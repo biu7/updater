@@ -1,0 +1,28 @@
+# 示例：将 updater 与业务栈放在同一 Compose 项目中时使用。
+# 请根据实际路径修改卷挂载与 COMPOSE_PROJECT_DIR。
+
+services:
+  updater:
+    build:
+      context: . # 本仓库根目录（含 Dockerfile）
+    # 默认仅在 Compose 内部网络暴露服务；如需本机调试，再显式添加 ports 映射。
+    expose:
+      - "8080"
+    environment:
+      PORT: "8080"
+      # 容器内能看到的主 compose 项目目录（需与下方卷挂载一致）
+      COMPOSE_PROJECT_DIR: /workspace/stack
+      # 若使用非默认文件名，可指定，多个文件用逗号分隔
+      # COMPOSE_FILE: docker-compose.yml,override.yml
+      # 可选：仅允许更新的服务名，逗号分隔
+      # ALLOWED_SERVICES: web,api
+      UPDATE_TIMEOUT: 10m
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /path/on/host/to/your/compose-project:/workspace/stack:ro
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge

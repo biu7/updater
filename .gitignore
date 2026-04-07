@@ -1,0 +1,40 @@
+# 构建产物与本仓库二进制名
+/updater
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# 测试覆盖率
+*.coverprofile
+coverage.out
+coverage.html
+
+# Go workspace（若使用）
+go.work
+go.work.sum
+
+# 依赖目录（若启用 vendor）
+/vendor/
+
+# 本地环境（勿提交密钥）
+.env
+.env.*
+!.env.example
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log

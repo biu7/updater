@@ -15,38 +15,33 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
-  build-and-push:
+  test:
     runs-on: ubuntu-latest
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: 设置 Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
       - name: 执行测试
         run: go test ./...
 
+  prepare:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image_name: ${{ steps.image.outputs.name }}
+      tags: ${{ steps.meta.outputs.tags }}
+      labels: ${{ steps.meta.outputs.labels }}
+    steps:
       - name: 规范化镜像仓库路径（GHCR 要求小写）
         id: image
         run: |
           repo_lower=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           echo "name=${{ env.REGISTRY }}/${repo_lower}" >> "$GITHUB_OUTPUT"
-
-      - name: 设置 Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: 设置 QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: 登录 GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 判断是否为正式版 tag
         id: release
@@ -60,21 +55,115 @@ jobs:
 
       - name: 提取镜像标签（git tag；正式版额外打 latest）
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
             type=ref,event=tag
             type=raw,value=latest,enable=${{ steps.release.outputs.is_release == 'true' }}
 
-      - name: 构建并推送
-        uses: docker/build-push-action@v6
+  build-amd64:
+    needs: prepare
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送 amd64 镜像
+        id: build
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          labels: ${{ needs.prepare.outputs.labels }}
+          outputs: type=image,"name=${{ needs.prepare.outputs.image_name }}",push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=publish-amd64
+          cache-to: type=gha,mode=max,scope=publish-amd64
+          provenance: false
+
+  build-arm64:
+    needs: prepare
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送 arm64 镜像
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          labels: ${{ needs.prepare.outputs.labels }}
+          outputs: type=image,"name=${{ needs.prepare.outputs.image_name }}",push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=publish-arm64
+          cache-to: type=gha,mode=max,scope=publish-arm64
+          provenance: false
+
+  merge-manifest:
+    needs:
+      - prepare
+      - build-amd64
+      - build-arm64
+    runs-on: ubuntu-latest
+    steps:
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 合并多架构镜像
+        env:
+          IMAGE_NAME: ${{ needs.prepare.outputs.image_name }}
+          TAGS: ${{ needs.prepare.outputs.tags }}
+          DIGEST_AMD64: ${{ needs.build-amd64.outputs.digest }}
+          DIGEST_ARM64: ${{ needs.build-arm64.outputs.digest }}
+        run: |
+          set -euo pipefail
+          tag_args=()
+          while IFS= read -r tag; do
+            if [ -n "$tag" ]; then
+              tag_args+=("-t" "$tag")
+            fi
+          done <<< "$TAGS"
+
+          docker buildx imagetools create \
+            "${tag_args[@]}" \
+            "${IMAGE_NAME}@${DIGEST_AMD64}" \
+            "${IMAGE_NAME}@${DIGEST_ARM64}"
+
+      - name: 验证多架构镜像
+        env:
+          IMAGE_NAME: ${{ needs.prepare.outputs.image_name }}
+        run: docker buildx imagetools inspect "${IMAGE_NAME}:${GITHUB_REF_NAME}"

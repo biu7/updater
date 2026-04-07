@@ -14,32 +14,52 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: 设置 Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
       - name: 执行测试
         run: go test ./...
 
-  docker-build:
+  docker-build-amd64:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 设置 QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: actions/checkout@v6
 
       - name: 设置 Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
-      - name: 验证 Dockerfile 可多架构构建
-        uses: docker/build-push-action@v6
+      - name: 验证 Dockerfile 可构建 amd64 镜像
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
+          cache-from: type=gha,scope=ci-amd64
+          cache-to: type=gha,mode=max,scope=ci-amd64
+          push: false
+
+  docker-build-arm64:
+    needs: test
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 验证 Dockerfile 可构建 arm64 镜像
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          cache-from: type=gha,scope=ci-arm64
+          cache-to: type=gha,mode=max,scope=ci-arm64
           push: false

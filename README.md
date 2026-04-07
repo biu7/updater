@@ -16,11 +16,39 @@
 ## HTTP 接口
 
 - `GET /health` — 健康检查
-- `POST /update` — 请求体 `{"service":"服务名"}`，成功返回 `202`，响应中含 `job_id`
-- `GET /jobs/:id` — 查询任务；`message` 字段说明结果（例如已跳过重启）
+- `POST /update` — 请求体 `{"service":"服务名"}`，成功返回 `200`，响应中 `data.job_id` 为任务 ID
+- `GET /jobs/:id` — 查询任务；`message` 为结果说明，日志放在 `data.log_tail`，`status` 可能为 `pending`、`running`、`skipped`、`succeeded`、`failed`
 
 同一 Compose **服务名**在任意时刻只允许存在一个进行中的任务（`pending` 或 `running`）。冲突时返回 `409`，响应中带
-`existing_job_id`。
+`data.existing_job_id`。
+
+常见返回示例如下：
+
+```json
+{
+  "code": 200,
+  "message": "未检测到需要更新的版本，已跳过本次更新",
+  "data": {
+    "id": "51bdb72b-2600-4240-970b-20d74c19dfa9",
+    "service": "transfer",
+    "status": "skipped",
+    "log_tail": "[updater] 从 compose 解析到镜像引用: repo/app:latest\n..."
+  }
+}
+```
+
+创建任务时的返回示例：
+
+```json
+{
+  "code": 200,
+  "message": "更新任务已创建，正在后台执行",
+  "data": {
+    "job_id": "51bdb72b-2600-4240-970b-20d74c19dfa9",
+    "service": "transfer"
+  }
+}
+```
 
 ## 构建与本地运行
 

@@ -33,3 +33,23 @@ func TestStore_Finish_ReleasesService(t *testing.T) {
 		t.Fatalf("结束后应可再次入队，但得到冲突 existing=%v", ex)
 	}
 }
+
+func TestStore_FinishSkipped_ReleasesService(t *testing.T) {
+	s := NewStore()
+	j, _, _ := s.TryEnqueue("web")
+	s.MarkRunning(j.ID)
+	s.FinishSkipped(j.ID, "skip", "log")
+
+	got := s.Get(j.ID)
+	if got == nil {
+		t.Fatal("任务不应为空")
+	}
+	if got.Status != StatusSkipped {
+		t.Fatalf("status = %q, want %q", got.Status, StatusSkipped)
+	}
+
+	_, ex, err := s.TryEnqueue("web")
+	if err == ErrConflict {
+		t.Fatalf("跳过后应可再次入队，但得到冲突 existing=%v", ex)
+	}
+}

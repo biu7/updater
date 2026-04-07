@@ -28,46 +28,35 @@ type updateBody struct {
 	Service string `json:"service"`
 }
 
-type envelopeOK struct {
-	OK   bool        `json:"ok"`
-	Data interface{} `json:"data,omitempty"`
-}
-
-type envelopeErr struct {
-	OK            bool   `json:"ok"`
-	Error         string `json:"error"`
-	Message       string `json:"message,omitempty"`
-	ExistingJobID string `json:"existing_job_id,omitempty"`
-}
-
 // PostUpdate 异步触发指定服务的 compose 更新。
 func (h *Handlers) PostUpdate(c *gin.Context) {
 	var body updateBody
 	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, envelopeErr{OK: false, Error: "请求体无效"})
+		writeResponse(c, http.StatusBadRequest, codeInvalidJSON, "请求体格式不正确", err.Error(), nil)
 		return
 	}
 	if err := ValidateServiceName(body.Service); err != nil {
-		c.JSON(http.StatusBadRequest, envelopeErr{OK: false, Error: err.Error()})
+		writeResponse(c, http.StatusBadRequest, codeInvalidService, "服务名称不合法", err.Error(), nil)
 		return
 	}
 	if !h.cfg.IsServiceAllowed(body.Service) {
-		c.JSON(http.StatusForbidden, envelopeErr{OK: false, Error: "服务不在允许列表中"})
+		writeResponse(c, http.StatusForbidden, codeServiceForbidden, "该服务不在允许更新范围内", "", gin.H{
+			"service": body.Service,
+		})
 		return
 	}
 
 	j, existing, err := h.store.TryEnqueue(body.Service)
 	if err != nil {
 		if err == jobs.ErrConflict && existing != nil {
-			c.JSON(http.StatusConflict, envelopeErr{
-				OK:            false,
-				Error:         "当前服务已有进行中的更新任务",
-				Message:       "请等待现有任务结束后再试，或查询该任务状态",
-				ExistingJobID: existing.ID,
+			writeResponse(c, http.StatusConflict, codeJobConflict, "当前服务已有更新任务正在执行", "", gin.H{
+				"existing_job_id": existing.ID,
+				"service":         existing.Service,
+				"status":          existing.Status,
 			})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, envelopeErr{OK: false, Error: "无法创建任务"})
+		writeResponse(c, http.StatusInternalServerError, codeCreateJobFailed, "创建更新任务失败，请稍后重试", err.Error(), nil)
 		return
 	}
 
@@ -75,12 +64,9 @@ func (h *Handlers) PostUpdate(c *gin.Context) {
 
 	go h.runJob(j.ID, j.Service)
 
-	c.JSON(http.StatusAccepted, envelopeOK{
-		OK: true,
-		Data: gin.H{
-			"job_id":  j.ID,
-			"service": j.Service,
-		},
+	writeResponse(c, http.StatusOK, successCode, "更新任务已创建，正在后台执行", "", gin.H{
+		"job_id":  j.ID,
+		"service": j.Service,
 	})
 }
 
@@ -99,6 +85,10 @@ func (h *Handlers) runJob(jobID, service string) {
 		return
 	}
 	log.Printf("任务成功: job=%s service=%s msg=%s", jobID, service, msg)
+	if isSkippedMessage(msg) || isUncertainSkippedMessage(msg) {
+		h.store.FinishSkipped(jobID, msg, logTail)
+		return
+	}
 	h.store.FinishSucceeded(jobID, msg, logTail)
 }
 
@@ -107,13 +97,14 @@ func (h *Handlers) GetJob(c *gin.Context) {
 	id := c.Param("id")
 	j := h.store.Get(id)
 	if j == nil {
-		c.JSON(http.StatusNotFound, envelopeErr{OK: false, Error: "任务不存在"})
+		writeResponse(c, http.StatusNotFound, codeJobNotFound, "未找到对应的更新任务", "请确认任务 ID 是否正确", nil)
 		return
 	}
-	c.JSON(http.StatusOK, envelopeOK{OK: true, Data: j})
+	httpStatus, code, message, detail, data := buildJobResponse(j)
+	writeResponse(c, httpStatus, code, message, detail, data)
 }
 
 // Health 健康检查。
 func (h *Handlers) Health(c *gin.Context) {
-	c.JSON(http.StatusOK, envelopeOK{OK: true, Data: gin.H{"status": "ok"}})
+	writeResponse(c, http.StatusOK, successCode, "服务运行正常", "", gin.H{"status": "ok"})
 }

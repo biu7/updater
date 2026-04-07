@@ -82,22 +82,20 @@ func (s *Store) MarkRunning(id string) bool {
 
 // FinishSucceeded 标记成功并释放服务占用。
 func (s *Store) FinishSucceeded(id, message, logTail string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	j := s.jobs[id]
-	if j == nil {
-		return
-	}
-	now := time.Now().UTC()
-	j.Status = StatusSucceeded
-	j.Message = message
-	j.LogTail = logTail
-	j.FinishedAt = &now
-	delete(s.activeByService, j.Service)
+	s.finish(id, StatusSucceeded, message, "", logTail)
+}
+
+// FinishSkipped 标记任务已跳过并释放服务占用。
+func (s *Store) FinishSkipped(id, message, logTail string) {
+	s.finish(id, StatusSkipped, message, "", logTail)
 }
 
 // FinishFailed 标记失败并释放服务占用。
 func (s *Store) FinishFailed(id, errMsg, logTail string) {
+	s.finish(id, StatusFailed, "", errMsg, logTail)
+}
+
+func (s *Store) finish(id string, status Status, message, errMsg, logTail string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j := s.jobs[id]
@@ -105,7 +103,8 @@ func (s *Store) FinishFailed(id, errMsg, logTail string) {
 		return
 	}
 	now := time.Now().UTC()
-	j.Status = StatusFailed
+	j.Status = status
+	j.Message = message
 	j.Error = errMsg
 	j.LogTail = logTail
 	j.FinishedAt = &now

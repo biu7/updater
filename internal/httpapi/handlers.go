@@ -7,9 +7,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"updater/internal/config"
-	"updater/internal/jobs"
-	"updater/internal/updater"
+	"github.com/biu7/updater/internal/config"
+	"github.com/biu7/updater/internal/jobs"
+	"github.com/biu7/updater/internal/updater"
 )
 
 // Handlers 聚合 HTTP 处理函数依赖。

@@ -1,4 +1,4 @@
-module updater
+module github.com/biu7/updater
 
 go 1.25
 

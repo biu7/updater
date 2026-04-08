@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"updater/internal/config"
-	"updater/internal/httpapi"
-	"updater/internal/jobs"
-	"updater/internal/updater"
+	"github.com/biu7/updater/internal/config"
+	"github.com/biu7/updater/internal/httpapi"
+	"github.com/biu7/updater/internal/jobs"
+	"github.com/biu7/updater/internal/updater"
 )
 
 func main() {

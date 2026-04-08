@@ -4,9 +4,9 @@ package httpapi
 import (
 	"github.com/gin-gonic/gin"
 
-	"updater/internal/config"
-	"updater/internal/jobs"
-	"updater/internal/updater"
+	"github.com/biu7/updater/internal/config"
+	"github.com/biu7/updater/internal/jobs"
+	"github.com/biu7/updater/internal/updater"
 )
 
 // NewRouter 注册路由。

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"updater/internal/jobs"
+	"github.com/biu7/updater/internal/jobs"
 )
 
 func TestFriendlySuccessMessage(t *testing.T) {

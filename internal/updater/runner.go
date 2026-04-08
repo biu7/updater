@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"updater/internal/config"
+	"github.com/biu7/updater/internal/config"
 )
 
 // Runner 封装对 docker compose 的调用。

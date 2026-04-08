@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"updater/internal/config"
+	"github.com/biu7/updater/internal/config"
 )
 
 func TestRunnerUpdateService_SkipWhenImageIDUnchanged(t *testing.T) {

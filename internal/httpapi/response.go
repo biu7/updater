@@ -7,7 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"updater/internal/jobs"
+	"github.com/biu7/updater/internal/jobs"
 )
 
 const (

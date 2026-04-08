@@ -50,6 +50,63 @@
 }
 ```
 
+## Go SDK
+
+模块路径为 `github.com/biu7/updater`，客户端包为 `github.com/biu7/updater/pkg/client`。若你使用 fork 仓库，请将本仓库 `go.mod` 中的 `module` 改为你的模块路径，并在业务代码中使用一致的 import。
+
+```go
+import (
+    "context"
+    "errors"
+    "time"
+
+    "github.com/biu7/updater/pkg/client"
+)
+
+func example() error {
+    c, err := client.NewWithBaseURL("http://127.0.0.1:8080")
+    if err != nil {
+        return err
+    }
+    ctx := context.Background()
+
+    h, err := c.Health(ctx)
+    if err != nil {
+        return err
+    }
+    if !h.OK() {
+        return errors.New("健康检查未通过")
+    }
+
+    created, err := c.Update(ctx, "transfer")
+    if err != nil {
+        return err
+    }
+    if created.Conflict() {
+        // 使用 created.ExistingJobID 继续查询或等待
+        _ = created.ExistingJobID
+        return nil
+    }
+    if !created.Created() {
+        return nil // 按需处理参数错误、403 等
+    }
+
+    // 轮询直到终态；失败时 HTTP 可能仍为 200，但 res.Failed() / res.Code 会反映业务失败
+    res, err := c.WaitJob(ctx, created.JobID, 500*time.Millisecond)
+    if err != nil {
+        return err
+    }
+    switch {
+    case res.Succeeded():
+    case res.Skipped():
+    case res.Failed():
+    }
+    return nil
+}
+```
+
+`Job` / `JobResult` 提供 `Succeeded()`、`Failed()`、`Skipped()`、`Pending()`、`Running()`、`Done()`、`InProgress()` 等方法，避免手写状态字符串判断。任务执行失败时服务端可能返回 HTTP 200 且 JSON `code` 为 `50010`，SDK 仍以 `res.Failed()` 与 `res.Code == client.CodeJobExecutionError` 表示。
+
 ## 构建与本地运行
 
 ```bash

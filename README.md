@@ -52,7 +52,17 @@
 
 ## Go SDK
 
-模块路径为 `github.com/biu7/updater`，客户端包为 `github.com/biu7/updater/pkg/client`。若你使用 fork 仓库，请将本仓库 `go.mod` 中的 `module` 改为你的模块路径，并在业务代码中使用一致的 import。
+客户端位于**独立子模块** `github.com/biu7/updater/pkg/client`（目录 [`pkg/client/go.mod`](pkg/client/go.mod)），**仅依赖标准库**，接入方 `go get` 时不会把服务端用的 Gin 等依赖拉进你的模块图。
+
+服务端主模块仍为 `github.com/biu7/updater`（根目录 [`go.mod`](go.mod)）。若你 fork，请同步修改根目录与 `pkg/client` 两处 `module` 路径。
+
+本地只测 SDK：`cd pkg/client && go test ./...`。若希望在仓库根目录同时编辑主模块与子模块，可将 [`go.work.example`](go.work.example) 复制为 `go.work`（该文件已被 `.gitignore` 忽略，勿提交）。
+
+```bash
+go get github.com/biu7/updater/pkg/client@latest
+```
+
+单独为 SDK 发版时，请使用**子模块 tag**（与根目录 `v1.2.3` 可并存），例如：`pkg/client/v0.1.0`。
 
 ```go
 import (

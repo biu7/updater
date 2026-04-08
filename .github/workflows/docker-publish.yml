@@ -27,7 +27,9 @@ jobs:
           go-version-file: go.mod
 
       - name: 执行测试
-        run: go test ./...
+        run: |
+          go test ./...
+          (cd pkg/client && go test ./...)
 
   prepare:
     needs: test

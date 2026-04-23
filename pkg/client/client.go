@@ -105,11 +105,20 @@ func (c *Client) Health(ctx context.Context) (*HealthResult, error) {
 
 // Update 调用 POST /update，异步创建更新任务。
 func (c *Client) Update(ctx context.Context, service string) (*CreateUpdateResult, error) {
+	return c.createServiceJob(ctx, "/update", service)
+}
+
+// Restart 调用 POST /restart，异步创建重启任务。
+func (c *Client) Restart(ctx context.Context, service string) (*CreateUpdateResult, error) {
+	return c.createServiceJob(ctx, "/restart", service)
+}
+
+func (c *Client) createServiceJob(ctx context.Context, path string, service string) (*CreateUpdateResult, error) {
 	payload, err := json.Marshal(map[string]string{"service": service})
 	if err != nil {
 		return nil, err
 	}
-	status, env, _, err := c.doRequest(ctx, http.MethodPost, "/update", bytes.NewReader(payload), "application/json")
+	status, env, _, err := c.doRequest(ctx, http.MethodPost, path, bytes.NewReader(payload), "application/json")
 	if err != nil {
 		return nil, err
 	}
@@ -124,23 +133,27 @@ func (c *Client) Update(ctx context.Context, service string) (*CreateUpdateResul
 	}
 	// 成功创建
 	var created struct {
-		JobID   string `json:"job_id"`
-		Service string `json:"service"`
+		JobID   string    `json:"job_id"`
+		Service string    `json:"service"`
+		Action  JobAction `json:"action"`
 	}
 	if err := json.Unmarshal(env.Data, &created); err == nil && created.JobID != "" {
 		out.JobID = created.JobID
 		out.Service = created.Service
+		out.Action = created.Action
 		return out, nil
 	}
 	// 409 冲突
 	var conflict struct {
 		ExistingJobID string    `json:"existing_job_id"`
 		Service       string    `json:"service"`
+		Action        JobAction `json:"action"`
 		Status        JobStatus `json:"status"`
 	}
 	if err := json.Unmarshal(env.Data, &conflict); err == nil && conflict.ExistingJobID != "" {
 		out.ExistingJobID = conflict.ExistingJobID
 		out.ExistingService = conflict.Service
+		out.ExistingAction = conflict.Action
 		out.ExistingStatus = conflict.Status
 	}
 	return out, nil

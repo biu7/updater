@@ -233,6 +233,54 @@ func TestRunnerUpdateService_SkipWhenPullOutputIsUncertain(t *testing.T) {
 	}
 }
 
+func TestRunnerRestartService(t *testing.T) {
+	var gotArgs [][]string
+	r := &Runner{
+		cfg: config.Config{
+			ComposeFiles: []string{"docker-compose.yml"},
+		},
+		runFn: func(ctx context.Context, args []string, logSink io.Writer) error {
+			gotArgs = append(gotArgs, append([]string(nil), args...))
+			_, _ = io.WriteString(logSink, "restart output\n")
+			return nil
+		},
+	}
+
+	msg, logTail, err := r.RestartService(context.Background(), "api")
+	if err != nil {
+		t.Fatalf("RestartService() error = %v", err)
+	}
+	if msg != "重启已完成（已执行 restart）" {
+		t.Fatalf("unexpected message: %q", msg)
+	}
+	wantArgs := [][]string{
+		{"compose", "-f", "docker-compose.yml", "restart", "api"},
+	}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("run args = %#v, want %#v", gotArgs, wantArgs)
+	}
+	if !strings.Contains(logTail, "restart output") {
+		t.Fatalf("log tail should contain restart output: %q", logTail)
+	}
+}
+
+func TestRunnerRestartService_ReturnsCommandError(t *testing.T) {
+	r := &Runner{
+		cfg: config.Config{},
+		runFn: func(ctx context.Context, args []string, logSink io.Writer) error {
+			return fmt.Errorf("boom")
+		},
+	}
+
+	_, _, err := r.RestartService(context.Background(), "api")
+	if err == nil {
+		t.Fatal("RestartService() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "docker compose restart") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestCappedBuffer_ConcurrentWrite(t *testing.T) {
 	var (
 		buf cappedBuffer

@@ -49,7 +49,7 @@ func (r *JobResult) TerminalFailure() bool {
 	return r.Done() && r.Failed()
 }
 
-// CreateUpdateResult 表示 POST /update 的解析结果。
+// CreateUpdateResult 表示 POST /update 或 POST /restart 的解析结果。
 type CreateUpdateResult struct {
 	HTTPStatus int
 	Code       int
@@ -59,10 +59,12 @@ type CreateUpdateResult struct {
 	// 创建成功时（code=200 且 HTTP 200）
 	JobID   string
 	Service string
+	Action  JobAction
 
 	// 409 冲突时
 	ExistingJobID   string
 	ExistingService string
+	ExistingAction  JobAction
 	ExistingStatus  JobStatus
 }
 

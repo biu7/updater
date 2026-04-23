@@ -25,10 +25,19 @@ const (
 	StatusFailed    JobStatus = "failed"
 )
 
+// JobAction 任务动作，与服务端 jobs.Action 的 JSON 值一致。
+type JobAction string
+
+const (
+	ActionUpdate  JobAction = "update"
+	ActionRestart JobAction = "restart"
+)
+
 // Job 表示 GET /jobs/:id 返回的 data 中的任务信息。
 type Job struct {
 	ID         string     `json:"id"`
 	Service    string     `json:"service"`
+	Action     JobAction  `json:"action"`
 	Status     JobStatus  `json:"status"`
 	Error      string     `json:"error,omitempty"`
 	LogTail    string     `json:"log_tail,omitempty"`
@@ -37,7 +46,7 @@ type Job struct {
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
 
-// Succeeded 是否为成功完成（已执行更新流程且判定为成功）。
+// Succeeded 是否为成功完成。
 func (j *Job) Succeeded() bool {
 	return j.Status == StatusSucceeded
 }
@@ -47,7 +56,7 @@ func (j *Job) Failed() bool {
 	return j.Status == StatusFailed
 }
 
-// Skipped 是否为跳过（无新版本或无法确认等）。
+// Skipped 是否为跳过（通常仅 update 动作会出现）。
 func (j *Job) Skipped() bool {
 	return j.Status == StatusSkipped
 }

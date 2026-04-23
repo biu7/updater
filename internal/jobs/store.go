@@ -11,7 +11,7 @@ import (
 
 var (
 	// ErrConflict 表示该服务已有进行中的任务（pending 或 running）。
-	ErrConflict = errors.New("服务已有进行中的更新任务")
+	ErrConflict = errors.New("服务已有进行中的任务")
 )
 
 // Store 内存任务仓库，按服务串行约束同一时刻仅一个活动任务。
@@ -31,7 +31,7 @@ func NewStore() *Store {
 }
 
 // TryEnqueue 尝试为指定服务创建任务；若已有活动任务则返回冲突与已有 job。
-func (s *Store) TryEnqueue(service string) (*Job, *Job, error) {
+func (s *Store) TryEnqueue(service string, action Action) (*Job, *Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -47,6 +47,7 @@ func (s *Store) TryEnqueue(service string) (*Job, *Job, error) {
 	j := &Job{
 		ID:        id,
 		Service:   service,
+		Action:    action,
 		Status:    StatusPending,
 		CreatedAt: now,
 	}

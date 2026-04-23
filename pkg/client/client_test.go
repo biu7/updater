@@ -39,9 +39,13 @@ func TestHealth_OK(t *testing.T) {
 
 func TestUpdate_Created(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/update" {
+			http.NotFound(w, r)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 200, "message": "更新任务已创建，正在后台执行",
-			"data": map[string]string{"job_id": "j1", "service": "api"},
+			"data": map[string]string{"job_id": "j1", "service": "api", "action": "update"},
 		})
 	}))
 	defer srv.Close()
@@ -54,6 +58,9 @@ func TestUpdate_Created(t *testing.T) {
 	if !res.Created() || res.JobID != "j1" || res.Service != "api" {
 		t.Fatalf("unexpected: %+v", res)
 	}
+	if res.Action != client.ActionUpdate {
+		t.Fatalf("action = %q, want %q", res.Action, client.ActionUpdate)
+	}
 	if res.Conflict() {
 		t.Fatal("不应为冲突")
 	}
@@ -61,11 +68,15 @@ func TestUpdate_Created(t *testing.T) {
 
 func TestUpdate_Conflict(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/update" {
+			http.NotFound(w, r)
+			return
+		}
 		w.WriteHeader(http.StatusConflict)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 40901, "message": "当前服务已有更新任务正在执行",
 			"data": map[string]interface{}{
-				"existing_job_id": "old", "service": "api", "status": "running",
+				"existing_job_id": "old", "service": "api", "action": "restart", "status": "running",
 			},
 		})
 	}))
@@ -79,6 +90,32 @@ func TestUpdate_Conflict(t *testing.T) {
 	if !res.Conflict() || res.ExistingJobID != "old" || res.ExistingStatus != client.StatusRunning {
 		t.Fatalf("unexpected: %+v", res)
 	}
+	if res.ExistingAction != client.ActionRestart {
+		t.Fatalf("existing action = %q, want %q", res.ExistingAction, client.ActionRestart)
+	}
+}
+
+func TestRestart_Created(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/restart" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"code": 200, "message": "重启任务已创建，正在后台执行",
+			"data": map[string]string{"job_id": "r1", "service": "api", "action": "restart"},
+		})
+	}))
+	defer srv.Close()
+
+	c, _ := client.NewWithBaseURL(srv.URL)
+	res, err := c.Restart(context.Background(), "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Created() || res.Action != client.ActionRestart || res.JobID != "r1" {
+		t.Fatalf("unexpected: %+v", res)
+	}
 }
 
 func TestGetJob_FailedHTTP200(t *testing.T) {
@@ -86,7 +123,7 @@ func TestGetJob_FailedHTTP200(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": client.CodeJobExecutionError, "message": "更新任务执行失败，请稍后重试",
 			"data": map[string]interface{}{
-				"id": "j1", "service": "api", "status": "failed", "error": "boom",
+				"id": "j1", "service": "api", "action": "update", "status": "failed", "error": "boom",
 			},
 		})
 	}))
@@ -102,6 +139,9 @@ func TestGetJob_FailedHTTP200(t *testing.T) {
 	}
 	if !res.Failed() || !res.Done() || res.Succeeded() {
 		t.Fatalf("状态判定错误: %+v", res)
+	}
+	if res.Job.Action != client.ActionUpdate {
+		t.Fatalf("action = %q, want %q", res.Job.Action, client.ActionUpdate)
 	}
 	if !res.TerminalFailure() {
 		t.Fatal("TerminalFailure 应为 true")
@@ -122,7 +162,7 @@ func TestWaitJob(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"code": 200, "message": "执行中",
 				"data": map[string]interface{}{
-					"id": "j1", "service": "api", "status": "running",
+					"id": "j1", "service": "api", "action": "restart", "status": "running",
 				},
 			})
 			return
@@ -130,7 +170,7 @@ func TestWaitJob(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 200, "message": "完成",
 			"data": map[string]interface{}{
-				"id": "j1", "service": "api", "status": "succeeded",
+				"id": "j1", "service": "api", "action": "restart", "status": "succeeded",
 			},
 		})
 	}))
@@ -144,6 +184,9 @@ func TestWaitJob(t *testing.T) {
 	}
 	if !res.Succeeded() || !res.Done() {
 		t.Fatalf("unexpected: %+v", res)
+	}
+	if res.Job.Action != client.ActionRestart {
+		t.Fatalf("action = %q, want %q", res.Job.Action, client.ActionRestart)
 	}
 }
 

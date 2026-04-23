@@ -112,6 +112,18 @@ func (r *Runner) UpdateService(ctx context.Context, service string) (message str
 	return "更新已完成（已执行 pull 与 up -d）", buf2.String(), nil
 }
 
+// RestartService 直接执行 docker compose restart 重启指定服务。
+func (r *Runner) RestartService(ctx context.Context, service string) (message string, log string, err error) {
+	var buf cappedBuffer
+	w := io.MultiWriter(&buf)
+
+	restartArgs := append(r.composeBaseArgs(), "restart", service)
+	if e := r.run(ctx, restartArgs, w); e != nil {
+		return "", buf.String(), fmt.Errorf("docker compose restart: %w", e)
+	}
+	return "重启已完成（已执行 restart）", buf.String(), nil
+}
+
 func (r *Runner) run(ctx context.Context, args []string, logSink io.Writer) error {
 	if r.runFn != nil {
 		return r.runFn(ctx, args, logSink)

@@ -13,10 +13,19 @@ const (
 	StatusFailed    Status = "failed"
 )
 
-// Job 表示一次更新任务。
+// Action 表示任务动作类型。
+type Action string
+
+const (
+	ActionUpdate  Action = "update"
+	ActionRestart Action = "restart"
+)
+
+// Job 表示一次异步服务任务。
 type Job struct {
 	ID         string     `json:"id"`
 	Service    string     `json:"service"`
+	Action     Action     `json:"action"`
 	Status     Status     `json:"status"`
 	Message    string     `json:"message,omitempty"`
 	Error      string     `json:"error,omitempty"`

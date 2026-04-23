@@ -17,6 +17,7 @@
 
 - `GET /health` — 健康检查
 - `POST /update` — 请求体 `{"service":"服务名"}`，成功返回 `200`，响应中 `data.job_id` 为任务 ID
+- `POST /restart` — 请求体 `{"service":"服务名"}`，异步重启指定服务，成功返回 `200`，响应中 `data.job_id` 为任务 ID
 - `GET /jobs/:id` — 查询任务；`message` 为结果说明，日志放在 `data.log_tail`，`status` 可能为 `pending`、`running`、`skipped`、`succeeded`、`failed`
 
 同一 Compose **服务名**在任意时刻只允许存在一个进行中的任务（`pending` 或 `running`）。冲突时返回 `409`，响应中带
@@ -31,6 +32,7 @@
   "data": {
     "id": "51bdb72b-2600-4240-970b-20d74c19dfa9",
     "service": "transfer",
+    "action": "update",
     "status": "skipped",
     "log_tail": "[updater] 从 compose 解析到镜像引用: repo/app:latest\n..."
   }
@@ -45,7 +47,22 @@
   "message": "更新任务已创建，正在后台执行",
   "data": {
     "job_id": "51bdb72b-2600-4240-970b-20d74c19dfa9",
-    "service": "transfer"
+    "service": "transfer",
+    "action": "update"
+  }
+}
+```
+
+创建重启任务时的返回示例：
+
+```json
+{
+  "code": 200,
+  "message": "重启任务已创建，正在后台执行",
+  "data": {
+    "job_id": "51bdb72b-2600-4240-970b-20d74c19dfa9",
+    "service": "transfer",
+    "action": "restart"
   }
 }
 ```
@@ -111,11 +128,22 @@ func example() error {
     case res.Skipped():
     case res.Failed():
     }
+
+    restarted, err := c.Restart(ctx, "transfer")
+    if err != nil {
+        return err
+    }
+    if restarted.Created() {
+        _, err = c.WaitJob(ctx, restarted.JobID, 500*time.Millisecond)
+        if err != nil {
+            return err
+        }
+    }
     return nil
 }
 ```
 
-`Job` / `JobResult` 提供 `Succeeded()`、`Failed()`、`Skipped()`、`Pending()`、`Running()`、`Done()`、`InProgress()` 等方法，避免手写状态字符串判断。任务执行失败时服务端可能返回 HTTP 200 且 JSON `code` 为 `50010`，SDK 仍以 `res.Failed()` 与 `res.Code == client.CodeJobExecutionError` 表示。
+`Job` / `JobResult` 提供 `Succeeded()`、`Failed()`、`Skipped()`、`Pending()`、`Running()`、`Done()`、`InProgress()` 等方法，避免手写状态字符串判断；`Job.Action` 可用于区分 `update` 与 `restart`。任务执行失败时服务端可能返回 HTTP 200 且 JSON `code` 为 `50010`，SDK 仍以 `res.Failed()` 与 `res.Code == client.CodeJobExecutionError` 表示。
 
 ## 构建与本地运行
 

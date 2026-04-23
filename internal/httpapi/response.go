@@ -31,6 +31,7 @@ type apiResponse struct {
 type jobData struct {
 	ID         string      `json:"id"`
 	Service    string      `json:"service"`
+	Action     jobs.Action `json:"action"`
 	Status     jobs.Status `json:"status"`
 	Error      string      `json:"error,omitempty"`
 	LogTail    string      `json:"log_tail,omitempty"`
@@ -52,6 +53,7 @@ func buildJobResponse(j *jobs.Job) (httpStatus int, code int, message string, de
 	data = jobData{
 		ID:         j.ID,
 		Service:    j.Service,
+		Action:     j.Action,
 		Status:     j.Status,
 		Error:      j.Error,
 		LogTail:    j.LogTail,
@@ -62,26 +64,49 @@ func buildJobResponse(j *jobs.Job) (httpStatus int, code int, message string, de
 
 	switch j.Status {
 	case jobs.StatusPending:
-		return http.StatusOK, successCode, "更新任务已创建，等待开始执行", "", data
+		return http.StatusOK, successCode, pendingMessage(j.Action), "", data
 	case jobs.StatusRunning:
-		return http.StatusOK, successCode, "更新任务正在执行中", "", data
+		return http.StatusOK, successCode, runningMessage(j.Action), "", data
 	case jobs.StatusSkipped:
-		return http.StatusOK, successCode, friendlySuccessMessage(j.Message), "", data
+		return http.StatusOK, successCode, friendlySuccessMessage(j.Action, j.Message), "", data
 	case jobs.StatusSucceeded:
-		return http.StatusOK, successCode, friendlySuccessMessage(j.Message), "", data
+		return http.StatusOK, successCode, friendlySuccessMessage(j.Action, j.Message), "", data
 	case jobs.StatusFailed:
-		return http.StatusOK, codeJobExecutionError, friendlyFailureMessage(j.Error), "", data
+		return http.StatusOK, codeJobExecutionError, friendlyFailureMessage(j.Action, j.Error), "", data
 	default:
 		return http.StatusOK, successCode, "任务状态未知", "", data
 	}
 }
 
-func friendlySuccessMessage(raw string) string {
+func pendingMessage(action jobs.Action) string {
+	switch action {
+	case jobs.ActionRestart:
+		return "重启任务已创建，等待开始执行"
+	default:
+		return "更新任务已创建，等待开始执行"
+	}
+}
+
+func runningMessage(action jobs.Action) string {
+	switch action {
+	case jobs.ActionRestart:
+		return "重启任务正在执行中"
+	default:
+		return "更新任务正在执行中"
+	}
+}
+
+func friendlySuccessMessage(action jobs.Action, raw string) string {
 	switch {
 	case raw == "":
+		if action == jobs.ActionRestart {
+			return "重启任务执行成功"
+		}
 		return "更新任务执行成功"
 	case isUpdatedMessage(raw):
 		return "检测到新版本，更新已完成"
+	case isRestartedMessage(raw):
+		return "服务重启已完成"
 	case isSkippedMessage(raw):
 		return "未检测到需要更新的版本，已跳过本次更新"
 	case isUncertainSkippedMessage(raw):
@@ -91,19 +116,32 @@ func friendlySuccessMessage(raw string) string {
 	}
 }
 
-func friendlyFailureMessage(raw string) string {
+func friendlyFailureMessage(action jobs.Action, raw string) string {
 	switch {
 	case strings.Contains(raw, "context deadline exceeded"):
+		if action == jobs.ActionRestart {
+			return "重启任务执行超时，已终止本次重启"
+		}
 		return "更新任务执行超时，已终止本次更新"
 	case raw == "":
+		if action == jobs.ActionRestart {
+			return "重启任务执行失败，请稍后重试"
+		}
 		return "更新任务执行失败，请稍后重试"
 	default:
+		if action == jobs.ActionRestart {
+			return "重启任务执行失败，请稍后重试"
+		}
 		return "更新任务执行失败，请稍后重试"
 	}
 }
 
 func isUpdatedMessage(raw string) bool {
 	return strings.Contains(raw, "更新已完成")
+}
+
+func isRestartedMessage(raw string) bool {
+	return strings.Contains(raw, "重启已完成")
 }
 
 func isSkippedMessage(raw string) bool {

@@ -16,3 +16,19 @@ func TestValidateServiceName(t *testing.T) {
 		t.Fatal("-bad 应失败")
 	}
 }
+
+func TestNormalizeServices(t *testing.T) {
+	got, err := NormalizeServices([]string{"web", " api ", "web"})
+	if err != nil {
+		t.Fatalf("NormalizeServices() error = %v", err)
+	}
+	if len(got) != 2 || got[0] != "web" || got[1] != "api" {
+		t.Fatalf("NormalizeServices() = %#v, want [web api]", got)
+	}
+}
+
+func TestNormalizeServices_Empty(t *testing.T) {
+	if _, err := NormalizeServices(nil); err == nil {
+		t.Fatal("空列表应失败")
+	}
+}

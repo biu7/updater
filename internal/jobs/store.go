@@ -1,4 +1,4 @@
-// Package jobs 维护内存中的异步更新任务及按服务串行的占用关系。
+// Package jobs 维护内存中的异步更新任务及串行执行关系。
 package jobs
 
 import (
@@ -10,49 +10,48 @@ import (
 )
 
 var (
-	// ErrConflict 表示该服务已有进行中的任务（pending 或 running）。
-	ErrConflict = errors.New("服务已有进行中的任务")
+	// ErrConflict 表示已有进行中的任务（pending 或 running）。
+	ErrConflict = errors.New("已有进行中的任务")
 )
 
-// Store 内存任务仓库，按服务串行约束同一时刻仅一个活动任务。
+// Store 内存任务仓库，约束同一时刻仅允许一个活动任务。
 type Store struct {
 	mu sync.Mutex
 
-	jobs            map[string]*Job
-	activeByService map[string]string // service -> jobID（pending 或 running）
+	jobs        map[string]*Job
+	activeJobID string // 当前 pending 或 running 的任务
 }
 
 // NewStore 创建空仓库。
 func NewStore() *Store {
 	return &Store{
-		jobs:            make(map[string]*Job),
-		activeByService: make(map[string]string),
+		jobs: make(map[string]*Job),
 	}
 }
 
-// TryEnqueue 尝试为指定服务创建任务；若已有活动任务则返回冲突与已有 job。
-func (s *Store) TryEnqueue(service string, action Action) (*Job, *Job, error) {
+// TryEnqueueBatch 尝试创建任务；若已有活动任务则返回冲突与已有 job。
+func (s *Store) TryEnqueueBatch(services []string, action Action) (*Job, *Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if existingID, ok := s.activeByService[service]; ok {
-		if j, ok2 := s.jobs[existingID]; ok2 {
-			return nil, j, ErrConflict
+	if s.activeJobID != "" {
+		if j, ok := s.jobs[s.activeJobID]; ok {
+			return nil, cloneJob(j), ErrConflict
 		}
-		delete(s.activeByService, service)
+		s.activeJobID = ""
 	}
 
 	id := uuid.NewString()
 	now := time.Now().UTC()
 	j := &Job{
 		ID:        id,
-		Service:   service,
+		Services:  append([]string(nil), services...),
 		Action:    action,
 		Status:    StatusPending,
 		CreatedAt: now,
 	}
 	s.jobs[id] = j
-	s.activeByService[service] = id
+	s.activeJobID = id
 	return j, nil, nil
 }
 
@@ -81,17 +80,17 @@ func (s *Store) MarkRunning(id string) bool {
 	return true
 }
 
-// FinishSucceeded 标记成功并释放服务占用。
+// FinishSucceeded 标记成功并释放活动任务占用。
 func (s *Store) FinishSucceeded(id, message, logTail string) {
 	s.finish(id, StatusSucceeded, message, "", logTail)
 }
 
-// FinishSkipped 标记任务已跳过并释放服务占用。
+// FinishSkipped 标记任务已跳过并释放活动任务占用。
 func (s *Store) FinishSkipped(id, message, logTail string) {
 	s.finish(id, StatusSkipped, message, "", logTail)
 }
 
-// FinishFailed 标记失败并释放服务占用。
+// FinishFailed 标记失败并释放活动任务占用。
 func (s *Store) FinishFailed(id, errMsg, logTail string) {
 	s.finish(id, StatusFailed, "", errMsg, logTail)
 }
@@ -109,11 +108,14 @@ func (s *Store) finish(id string, status Status, message, errMsg, logTail string
 	j.Error = errMsg
 	j.LogTail = logTail
 	j.FinishedAt = &now
-	delete(s.activeByService, j.Service)
+	if s.activeJobID == id {
+		s.activeJobID = ""
+	}
 }
 
 func cloneJob(j *Job) *Job {
 	cp := *j
+	cp.Services = append([]string(nil), j.Services...)
 	if j.StartedAt != nil {
 		t := *j.StartedAt
 		cp.StartedAt = &t

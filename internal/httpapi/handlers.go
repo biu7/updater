@@ -1,10 +1,15 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -17,26 +22,32 @@ import (
 type Handlers struct {
 	cfg    config.Config
 	store  *jobs.Store
-	runner *updater.Runner
+	runner composeRunner
+}
+
+type composeRunner interface {
+	ResolveTargetServices(ctx context.Context) ([]string, error)
+	UpdateServices(ctx context.Context, services []string) (message string, log string, err error)
+	RestartServices(ctx context.Context, services []string) (message string, log string, err error)
 }
 
 // NewHandlers 创建处理器。
-func NewHandlers(cfg config.Config, store *jobs.Store, runner *updater.Runner) *Handlers {
+func NewHandlers(cfg config.Config, store *jobs.Store, runner composeRunner) *Handlers {
 	return &Handlers{cfg: cfg, store: store, runner: runner}
 }
 
 type updateBody struct {
-	Service string `json:"service"`
+	Services []string `json:"services"`
 }
 
-// PostUpdate 异步触发指定服务的 compose 更新。
+// PostUpdate 异步触发更新。
 func (h *Handlers) PostUpdate(c *gin.Context) {
-	h.enqueueServiceJob(c, jobs.ActionUpdate, "更新", "更新任务已创建，正在后台执行", h.runner.UpdateService)
+	h.enqueueServiceJob(c, jobs.ActionUpdate, "更新", "更新任务已创建，正在后台执行", h.runner.UpdateServices)
 }
 
-// PostRestart 异步触发指定服务的 compose 重启。
+// PostRestart 异步触发重启。
 func (h *Handlers) PostRestart(c *gin.Context) {
-	h.enqueueServiceJob(c, jobs.ActionRestart, "重启", "重启任务已创建，正在后台执行", h.runner.RestartService)
+	h.enqueueServiceJob(c, jobs.ActionRestart, "重启", "重启任务已创建，正在后台执行", h.runner.RestartServices)
 }
 
 func (h *Handlers) enqueueServiceJob(
@@ -44,32 +55,36 @@ func (h *Handlers) enqueueServiceJob(
 	action jobs.Action,
 	actionName string,
 	successMessage string,
-	run func(ctx context.Context, service string) (message string, log string, err error),
+	run func(ctx context.Context, services []string) (message string, log string, err error),
 ) {
-	var body updateBody
-	if err := c.ShouldBindJSON(&body); err != nil {
+	if _, err := parseUpdateBody(c); err != nil {
 		writeResponse(c, http.StatusBadRequest, codeInvalidJSON, "请求体格式不正确", err.Error(), nil)
 		return
 	}
-	if err := ValidateServiceName(body.Service); err != nil {
-		writeResponse(c, http.StatusBadRequest, codeInvalidService, "服务名称不合法", err.Error(), nil)
-		return
-	}
-	if !h.cfg.IsServiceAllowed(body.Service) {
-		writeResponse(c, http.StatusForbidden, codeServiceForbidden, "该服务不在允许更新范围内", "", gin.H{
-			"service": body.Service,
-		})
+
+	services, err := h.runner.ResolveTargetServices(c.Request.Context())
+	if err != nil {
+		switch {
+		case errors.Is(err, updater.ErrNoAllowedServices):
+			writeResponse(c, http.StatusForbidden, codeServiceForbidden, "当前 compose 中没有允许执行的服务，未创建任务", "", nil)
+		case errors.Is(err, updater.ErrNoComposeServices):
+			writeResponse(c, http.StatusInternalServerError, codeCreateJobFailed, "当前 compose 中未解析到可执行服务，未创建任务", err.Error(), nil)
+		default:
+			writeResponse(c, http.StatusInternalServerError, codeCreateJobFailed, fmt.Sprintf("创建%s任务失败，请稍后重试", actionName), err.Error(), nil)
+		}
 		return
 	}
 
-	j, existing, err := h.store.TryEnqueue(body.Service, action)
+	j, existing, err := h.store.TryEnqueueBatch(services, action)
 	if err != nil {
 		if err == jobs.ErrConflict && existing != nil {
-			writeResponse(c, http.StatusConflict, codeJobConflict, "当前服务已有任务正在执行", "", gin.H{
-				"existing_job_id": existing.ID,
-				"service":         existing.Service,
-				"action":          existing.Action,
-				"status":          existing.Status,
+			writeResponse(c, http.StatusConflict, codeJobConflict, "当前已有任务正在执行，未创建任务", "", gin.H{
+				"services":           existing.Services,
+				"existing_services":  existing.Services,
+				"requested_services": services,
+				"existing_job_id":    existing.ID,
+				"action":             existing.Action,
+				"status":             existing.Status,
 			})
 			return
 		}
@@ -77,22 +92,22 @@ func (h *Handlers) enqueueServiceJob(
 		return
 	}
 
-	log.Printf("已接受%s任务: job=%s service=%s", actionName, j.ID, j.Service)
+	log.Printf("已接受%s任务: job=%s services=%s", actionName, j.ID, strings.Join(j.Services, ","))
 
-	go h.runJob(j.ID, j.Service, actionName, run)
+	go h.runJob(j.ID, j.Services, actionName, run)
 
 	writeResponse(c, http.StatusOK, successCode, successMessage, "", gin.H{
-		"job_id":  j.ID,
-		"service": j.Service,
-		"action":  j.Action,
+		"job_id":   j.ID,
+		"services": j.Services,
+		"action":   j.Action,
 	})
 }
 
 func (h *Handlers) runJob(
 	jobID string,
-	service string,
+	services []string,
 	actionName string,
-	run func(ctx context.Context, service string) (message string, log string, err error),
+	run func(ctx context.Context, services []string) (message string, log string, err error),
 ) {
 	if !h.store.MarkRunning(jobID) {
 		log.Printf("任务无法进入 running（可能已被清理）: job=%s", jobID)
@@ -101,13 +116,13 @@ func (h *Handlers) runJob(
 	ctx, cancel := context.WithTimeout(context.Background(), h.cfg.UpdateTimeout)
 	defer cancel()
 
-	msg, logTail, err := run(ctx, service)
+	msg, logTail, err := run(ctx, services)
 	if err != nil {
-		log.Printf("%s任务失败: job=%s service=%s err=%v", actionName, jobID, service, err)
+		log.Printf("%s任务失败: job=%s services=%s err=%v", actionName, jobID, strings.Join(services, ","), err)
 		h.store.FinishFailed(jobID, err.Error(), logTail)
 		return
 	}
-	log.Printf("%s任务成功: job=%s service=%s msg=%s", actionName, jobID, service, msg)
+	log.Printf("%s任务成功: job=%s services=%s msg=%s", actionName, jobID, strings.Join(services, ","), msg)
 	if isSkippedMessage(msg) || isUncertainSkippedMessage(msg) {
 		h.store.FinishSkipped(jobID, msg, logTail)
 		return
@@ -130,4 +145,19 @@ func (h *Handlers) GetJob(c *gin.Context) {
 // Health 健康检查。
 func (h *Handlers) Health(c *gin.Context) {
 	writeResponse(c, http.StatusOK, successCode, "服务运行正常", "", gin.H{"status": "ok"})
+}
+
+func parseUpdateBody(c *gin.Context) (updateBody, error) {
+	var body updateBody
+	raw, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		return body, err
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return body, nil
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return updateBody{}, err
+	}
+	return body, nil
 }

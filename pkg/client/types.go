@@ -36,7 +36,7 @@ const (
 // Job 表示 GET /jobs/:id 返回的 data 中的任务信息。
 type Job struct {
 	ID         string     `json:"id"`
-	Service    string     `json:"service"`
+	Services   []string   `json:"services"`
 	Action     JobAction  `json:"action"`
 	Status     JobStatus  `json:"status"`
 	Error      string     `json:"error,omitempty"`

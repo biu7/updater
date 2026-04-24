@@ -1,6 +1,7 @@
 # updater
 
-运行在 Docker Compose 中的内部服务：接收 HTTP 更新请求，对指定服务执行 `docker compose pull`；仅在能够明确确认已拉取到新镜像时才执行
+运行在 Docker Compose 中的内部服务：接收 HTTP 更新请求，直接执行更新或重启。服务端会先解析 compose 中的服务列表；
+若配置了 `ALLOWED_SERVICES`，则仅对其中允许的服务执行 `docker compose pull` / `up -d` / `restart`。更新时仅在能够明确确认已拉取到新镜像时才执行
 `docker compose up -d`。若判断为无更新，或结果不确定，则跳过重启。任务异步执行，可通过任务 ID 查询状态。
 
 ## 环境变量
@@ -16,12 +17,11 @@
 ## HTTP 接口
 
 - `GET /health` — 健康检查
-- `POST /update` — 请求体 `{"service":"服务名"}`，成功返回 `200`，响应中 `data.job_id` 为任务 ID
-- `POST /restart` — 请求体 `{"service":"服务名"}`，异步重启指定服务，成功返回 `200`，响应中 `data.job_id` 为任务 ID
+- `POST /update` — 直接执行更新；请求体可为空或传 `{}`，旧的 `services` 字段即使传入也会被忽略。成功返回 `200`，响应中 `data.job_id` 为任务 ID，`data.services` 为本次实际纳入执行的服务列表
+- `POST /restart` — 直接执行重启；请求体可为空或传 `{}`，旧的 `services` 字段即使传入也会被忽略。成功返回 `200`，响应中 `data.job_id` 为任务 ID，`data.services` 为本次实际纳入执行的服务列表
 - `GET /jobs/:id` — 查询任务；`message` 为结果说明，日志放在 `data.log_tail`，`status` 可能为 `pending`、`running`、`skipped`、`succeeded`、`failed`
 
-同一 Compose **服务名**在任意时刻只允许存在一个进行中的任务（`pending` 或 `running`）。冲突时返回 `409`，响应中带
-`data.existing_job_id`。
+服务端会先解析 compose 中全部服务，再结合 `ALLOWED_SERVICES` 白名单得到“本次实际目标服务集合”。同一时刻只允许存在一个进行中的任务（`pending` 或 `running`）。若已有任务正在执行，则新的请求会整体失败，不创建任何任务。冲突时返回 `409`，响应中带 `data.existing_job_id`、`data.existing_services` 与 `data.requested_services`。若配置了白名单但当前 compose 中没有任何命中的允许服务，则返回 `403`。
 
 常见返回示例如下：
 
@@ -31,7 +31,7 @@
   "message": "未检测到需要更新的版本，已跳过本次更新",
   "data": {
     "id": "51bdb72b-2600-4240-970b-20d74c19dfa9",
-    "service": "transfer",
+    "services": ["transfer", "worker"],
     "action": "update",
     "status": "skipped",
     "log_tail": "[updater] 从 compose 解析到镜像引用: repo/app:latest\n..."
@@ -47,7 +47,7 @@
   "message": "更新任务已创建，正在后台执行",
   "data": {
     "job_id": "51bdb72b-2600-4240-970b-20d74c19dfa9",
-    "service": "transfer",
+    "services": ["transfer", "worker"],
     "action": "update"
   }
 }
@@ -61,7 +61,7 @@
   "message": "重启任务已创建，正在后台执行",
   "data": {
     "job_id": "51bdb72b-2600-4240-970b-20d74c19dfa9",
-    "service": "transfer",
+    "services": ["transfer", "worker"],
     "action": "restart"
   }
 }
@@ -105,7 +105,7 @@ func example() error {
         return errors.New("健康检查未通过")
     }
 
-    created, err := c.Update(ctx, "transfer")
+    created, err := c.Update(ctx)
     if err != nil {
         return err
     }
@@ -129,7 +129,7 @@ func example() error {
     case res.Failed():
     }
 
-    restarted, err := c.Restart(ctx, "transfer")
+    restarted, err := c.Restart(ctx)
     if err != nil {
         return err
     }
@@ -171,7 +171,7 @@ Docker Compose 在终端里经常对「已是最新」的镜像仍显示 **Pulle
 
 当前逻辑是：
 
-1. 执行 `docker compose config --format json`，读取该服务的 **`image:` 字符串**；若是仅 `build`、无 `image` 的服务，则仅参考
+1. 执行 `docker compose config --format json`，解析服务列表，并读取每个目标服务的 **`image:` 字符串**；若是仅 `build`、无 `image` 的服务，则仅参考
    `pull` 输出中那些能明确说明“无需拉取”的场景，例如 `no image to be pulled / must be built from source`。
 2. **pull 前**、**pull 后**各执行一次 `docker image inspect <该引用> -f '{{.Id}}'`。
 3. 只有在能够**明确确认镜像已变化**时，才会执行 `up -d`。若两次 ID 相同，或因 `compose config` / `image inspect` / `pull`

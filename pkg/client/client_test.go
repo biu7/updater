@@ -3,6 +3,7 @@ package client_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -43,19 +44,26 @@ func TestUpdate_Created(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(body) != `{}` {
+			t.Fatalf("unexpected body: %s", string(body))
+		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 200, "message": "更新任务已创建，正在后台执行",
-			"data": map[string]string{"job_id": "j1", "service": "api", "action": "update"},
+			"data": map[string]interface{}{"job_id": "j1", "services": []string{"api", "worker"}, "action": "update"},
 		})
 	}))
 	defer srv.Close()
 
 	c, _ := client.NewWithBaseURL(srv.URL)
-	res, err := c.Update(context.Background(), "api")
+	res, err := c.Update(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Created() || res.JobID != "j1" || res.Service != "api" {
+	if !res.Created() || res.JobID != "j1" || len(res.Services) != 2 || res.Services[0] != "api" {
 		t.Fatalf("unexpected: %+v", res)
 	}
 	if res.Action != client.ActionUpdate {
@@ -74,21 +82,31 @@ func TestUpdate_Conflict(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusConflict)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"code": 40901, "message": "当前服务已有更新任务正在执行",
+			"code": 40901, "message": "当前已有任务正在执行，未创建任务",
 			"data": map[string]interface{}{
-				"existing_job_id": "old", "service": "api", "action": "restart", "status": "running",
+				"existing_job_id":    "old",
+				"existing_services":  []string{"api", "worker"},
+				"requested_services": []string{"api", "worker", "cron"},
+				"action":             "restart",
+				"status":             "running",
 			},
 		})
 	}))
 	defer srv.Close()
 
 	c, _ := client.NewWithBaseURL(srv.URL)
-	res, err := c.Update(context.Background(), "api")
+	res, err := c.Update(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !res.Conflict() || res.ExistingJobID != "old" || res.ExistingStatus != client.StatusRunning {
 		t.Fatalf("unexpected: %+v", res)
+	}
+	if len(res.ExistingServices) != 2 {
+		t.Fatalf("unexpected conflict detail: %+v", res)
+	}
+	if len(res.RequestedServices) != 3 || res.RequestedServices[2] != "cron" {
+		t.Fatalf("unexpected requested services: %+v", res)
 	}
 	if res.ExistingAction != client.ActionRestart {
 		t.Fatalf("existing action = %q, want %q", res.ExistingAction, client.ActionRestart)
@@ -103,17 +121,17 @@ func TestRestart_Created(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 200, "message": "重启任务已创建，正在后台执行",
-			"data": map[string]string{"job_id": "r1", "service": "api", "action": "restart"},
+			"data": map[string]interface{}{"job_id": "r1", "services": []string{"api", "worker"}, "action": "restart"},
 		})
 	}))
 	defer srv.Close()
 
 	c, _ := client.NewWithBaseURL(srv.URL)
-	res, err := c.Restart(context.Background(), "api")
+	res, err := c.Restart(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Created() || res.Action != client.ActionRestart || res.JobID != "r1" {
+	if !res.Created() || res.Action != client.ActionRestart || res.JobID != "r1" || len(res.Services) != 2 {
 		t.Fatalf("unexpected: %+v", res)
 	}
 }
@@ -123,7 +141,7 @@ func TestGetJob_FailedHTTP200(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": client.CodeJobExecutionError, "message": "更新任务执行失败，请稍后重试",
 			"data": map[string]interface{}{
-				"id": "j1", "service": "api", "action": "update", "status": "failed", "error": "boom",
+				"id": "j1", "services": []string{"api", "worker"}, "action": "update", "status": "failed", "error": "boom",
 			},
 		})
 	}))
@@ -162,7 +180,7 @@ func TestWaitJob(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"code": 200, "message": "执行中",
 				"data": map[string]interface{}{
-					"id": "j1", "service": "api", "action": "restart", "status": "running",
+					"id": "j1", "services": []string{"api", "worker"}, "action": "restart", "status": "running",
 				},
 			})
 			return
@@ -170,7 +188,7 @@ func TestWaitJob(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 200, "message": "完成",
 			"data": map[string]interface{}{
-				"id": "j1", "service": "api", "action": "restart", "status": "succeeded",
+				"id": "j1", "services": []string{"api", "worker"}, "action": "restart", "status": "succeeded",
 			},
 		})
 	}))

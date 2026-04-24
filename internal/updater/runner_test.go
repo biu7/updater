@@ -40,11 +40,11 @@ func TestRunnerUpdateService_SkipWhenImageIDUnchanged(t *testing.T) {
 		},
 	}
 
-	msg, logTail, err := r.UpdateService(context.Background(), "web")
+	msg, logTail, err := r.UpdateServices(context.Background(), []string{"web"})
 	if err != nil {
 		t.Fatalf("UpdateService() error = %v", err)
 	}
-	if msg != "pull 后镜像 ID 未变化，已跳过重启" {
+	if msg != "所有服务 pull 后镜像 ID 均未变化，已跳过重启" {
 		t.Fatalf("unexpected message: %q", msg)
 	}
 	if idCalls != 2 {
@@ -58,6 +58,9 @@ func TestRunnerUpdateService_SkipWhenImageIDUnchanged(t *testing.T) {
 	}
 	if !strings.Contains(logTail, "pull output") {
 		t.Fatalf("log tail should contain pull output: %q", logTail)
+	}
+	if !strings.Contains(logTail, "本次更新目标服务: web") {
+		t.Fatalf("log tail should contain target services: %q", logTail)
 	}
 }
 
@@ -95,22 +98,25 @@ func TestRunnerUpdateService_RunUpWhenImageIDChanged(t *testing.T) {
 		},
 	}
 
-	msg, logTail, err := r.UpdateService(context.Background(), "api")
+	msg, logTail, err := r.UpdateServices(context.Background(), []string{"api", "worker"})
 	if err != nil {
 		t.Fatalf("UpdateService() error = %v", err)
 	}
-	if msg != "更新已完成（已执行 pull 与 up -d）" {
+	if msg != "更新已完成（已执行 pull 与 up -d，检测到更新的服务：api）" {
 		t.Fatalf("unexpected message: %q", msg)
 	}
 	wantArgs := [][]string{
-		{"compose", "pull", "api"},
-		{"compose", "up", "-d", "api"},
+		{"compose", "pull", "api", "worker"},
+		{"compose", "up", "-d", "api", "worker"},
 	}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("run args = %#v, want %#v", gotArgs, wantArgs)
 	}
 	if !strings.Contains(logTail, "pull output") || !strings.Contains(logTail, "up output") {
 		t.Fatalf("log tail should contain pull and up output: %q", logTail)
+	}
+	if !strings.Contains(logTail, "本次更新目标服务: api,worker") {
+		t.Fatalf("log tail should contain target services: %q", logTail)
 	}
 }
 
@@ -138,11 +144,11 @@ func TestRunnerUpdateService_SkipBuildOnlyServiceByPullOutput(t *testing.T) {
 		},
 	}
 
-	msg, logTail, err := r.UpdateService(context.Background(), "worker")
+	msg, logTail, err := r.UpdateServices(context.Background(), []string{"worker"})
 	if err != nil {
 		t.Fatalf("UpdateService() error = %v", err)
 	}
-	if msg != "pull 未发现可更新镜像（输出判定），已跳过重启" {
+	if msg != "本次 pull 未发现可更新镜像（输出判定），已跳过重启" {
 		t.Fatalf("unexpected message: %q", msg)
 	}
 	wantArgs := [][]string{
@@ -182,11 +188,11 @@ func TestRunnerUpdateService_SkipWhenImageIDCannotBeConfirmed(t *testing.T) {
 		},
 	}
 
-	msg, _, err := r.UpdateService(context.Background(), "api")
+	msg, _, err := r.UpdateServices(context.Background(), []string{"api"})
 	if err != nil {
 		t.Fatalf("UpdateService() error = %v", err)
 	}
-	if msg != "无法确认 pull 后镜像是否已更新，已跳过重启" {
+	if msg != "无法确认部分服务 pull 后镜像是否已更新，已跳过重启" {
 		t.Fatalf("unexpected message: %q", msg)
 	}
 	wantArgs := [][]string{
@@ -215,11 +221,11 @@ func TestRunnerUpdateService_SkipWhenPullOutputIsUncertain(t *testing.T) {
 		},
 	}
 
-	msg, logTail, err := r.UpdateService(context.Background(), "worker")
+	msg, logTail, err := r.UpdateServices(context.Background(), []string{"worker"})
 	if err != nil {
 		t.Fatalf("UpdateService() error = %v", err)
 	}
-	if msg != "无法确认是否已拉取到新镜像，已跳过重启" {
+	if msg != "无法确认本次 pull 是否已拉取到新镜像，已跳过重启" {
 		t.Fatalf("unexpected message: %q", msg)
 	}
 	wantArgs := [][]string{
@@ -233,7 +239,7 @@ func TestRunnerUpdateService_SkipWhenPullOutputIsUncertain(t *testing.T) {
 	}
 }
 
-func TestRunnerRestartService(t *testing.T) {
+func TestRunnerRestartServices(t *testing.T) {
 	var gotArgs [][]string
 	r := &Runner{
 		cfg: config.Config{
@@ -246,7 +252,7 @@ func TestRunnerRestartService(t *testing.T) {
 		},
 	}
 
-	msg, logTail, err := r.RestartService(context.Background(), "api")
+	msg, logTail, err := r.RestartServices(context.Background(), []string{"api", "worker"})
 	if err != nil {
 		t.Fatalf("RestartService() error = %v", err)
 	}
@@ -254,13 +260,16 @@ func TestRunnerRestartService(t *testing.T) {
 		t.Fatalf("unexpected message: %q", msg)
 	}
 	wantArgs := [][]string{
-		{"compose", "-f", "docker-compose.yml", "restart", "api"},
+		{"compose", "-f", "docker-compose.yml", "restart", "api", "worker"},
 	}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("run args = %#v, want %#v", gotArgs, wantArgs)
 	}
 	if !strings.Contains(logTail, "restart output") {
 		t.Fatalf("log tail should contain restart output: %q", logTail)
+	}
+	if !strings.Contains(logTail, "本次重启目标服务: api,worker") {
+		t.Fatalf("log tail should contain target services: %q", logTail)
 	}
 }
 
@@ -278,6 +287,118 @@ func TestRunnerRestartService_ReturnsCommandError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "docker compose restart") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunnerResolveTargetServices_AllServices(t *testing.T) {
+	r := &Runner{
+		cfg: config.Config{},
+		composeConfigRootFn: func(ctx context.Context) (map[string]any, error) {
+			return map[string]any{
+				"services": map[string]any{
+					"worker": map[string]any{},
+					"api":    map[string]any{},
+				},
+			}, nil
+		},
+	}
+
+	got, err := r.ResolveTargetServices(context.Background())
+	if err != nil {
+		t.Fatalf("ResolveTargetServices() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"api", "worker"}) {
+		t.Fatalf("ResolveTargetServices() = %#v", got)
+	}
+}
+
+func TestRunnerResolveTargetServices_RespectWhitelist(t *testing.T) {
+	r := &Runner{
+		cfg: config.Config{
+			AllowedServices: map[string]struct{}{
+				"worker": {},
+			},
+		},
+		composeConfigRootFn: func(ctx context.Context) (map[string]any, error) {
+			return map[string]any{
+				"services": map[string]any{
+					"worker": map[string]any{},
+					"api":    map[string]any{},
+				},
+			}, nil
+		},
+	}
+
+	got, err := r.ResolveTargetServices(context.Background())
+	if err != nil {
+		t.Fatalf("ResolveTargetServices() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"worker"}) {
+		t.Fatalf("ResolveTargetServices() = %#v", got)
+	}
+}
+
+func TestRunnerResolveTargetServices_NoAllowedServices(t *testing.T) {
+	r := &Runner{
+		cfg: config.Config{
+			AllowedServices: map[string]struct{}{
+				"cron": {},
+			},
+		},
+		composeConfigRootFn: func(ctx context.Context) (map[string]any, error) {
+			return map[string]any{
+				"services": map[string]any{
+					"worker": map[string]any{},
+					"api":    map[string]any{},
+				},
+			}, nil
+		},
+	}
+
+	_, err := r.ResolveTargetServices(context.Background())
+	if err != ErrNoAllowedServices {
+		t.Fatalf("ResolveTargetServices() error = %v, want %v", err, ErrNoAllowedServices)
+	}
+}
+
+func TestRunnerUpdateServices_ResolveWhenServicesEmpty(t *testing.T) {
+	var gotArgs [][]string
+	r := &Runner{
+		cfg: config.Config{
+			AllowedServices: map[string]struct{}{
+				"api": {},
+			},
+		},
+		composeConfigRootFn: func(ctx context.Context) (map[string]any, error) {
+			return map[string]any{
+				"services": map[string]any{
+					"api":    map[string]any{"image": "repo/api:latest"},
+					"worker": map[string]any{"image": "repo/worker:latest"},
+				},
+			}, nil
+		},
+		localImageIDFn: func(ctx context.Context, imageRef string) (string, error) {
+			return "sha256:same", nil
+		},
+		runFn: func(ctx context.Context, args []string, logSink io.Writer) error {
+			gotArgs = append(gotArgs, append([]string(nil), args...))
+			_, _ = io.WriteString(logSink, "pull output\n")
+			return nil
+		},
+	}
+
+	msg, _, err := r.UpdateServices(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("UpdateServices() error = %v", err)
+	}
+	if msg != "所有服务 pull 后镜像 ID 均未变化，已跳过重启" {
+		t.Fatalf("unexpected message: %q", msg)
+	}
+	wantArgs := [][]string{
+		{"compose", "pull", "api"},
+	}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("run args = %#v, want %#v", gotArgs, wantArgs)
 	}
 }
 

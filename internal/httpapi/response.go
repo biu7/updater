@@ -30,7 +30,7 @@ type apiResponse struct {
 
 type jobData struct {
 	ID         string      `json:"id"`
-	Service    string      `json:"service"`
+	Services   []string    `json:"services"`
 	Action     jobs.Action `json:"action"`
 	Status     jobs.Status `json:"status"`
 	Error      string      `json:"error,omitempty"`
@@ -52,7 +52,7 @@ func writeResponse(c *gin.Context, httpStatus, code int, message, detail string,
 func buildJobResponse(j *jobs.Job) (httpStatus int, code int, message string, detail string, data interface{}) {
 	data = jobData{
 		ID:         j.ID,
-		Service:    j.Service,
+		Services:   j.Services,
 		Action:     j.Action,
 		Status:     j.Status,
 		Error:      j.Error,
@@ -104,9 +104,9 @@ func friendlySuccessMessage(action jobs.Action, raw string) string {
 		}
 		return "更新任务执行成功"
 	case isUpdatedMessage(raw):
-		return "检测到新版本，更新已完成"
+		return "更新已完成"
 	case isRestartedMessage(raw):
-		return "服务重启已完成"
+		return "重启已完成"
 	case isSkippedMessage(raw):
 		return "未检测到需要更新的版本，已跳过本次更新"
 	case isUncertainSkippedMessage(raw):

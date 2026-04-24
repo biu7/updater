@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 )
 
@@ -45,6 +46,24 @@ func imageRefFromComposeConfig(root map[string]any, service string) (ref string,
 		return "", false
 	}
 	return img, true
+}
+
+// serviceNamesFromComposeConfig 返回 compose config 中声明的全部服务名，并按字典序排序。
+func serviceNamesFromComposeConfig(root map[string]any) []string {
+	services, _ := root["services"].(map[string]any)
+	if len(services) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(services))
+	for name := range services {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
 }
 
 // localImageIDExec 返回本地已存在镜像的 ID（docker image inspect），不存在或失败时返回 ("", error)。

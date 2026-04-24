@@ -104,21 +104,17 @@ func (c *Client) Health(ctx context.Context) (*HealthResult, error) {
 }
 
 // Update 调用 POST /update，异步创建更新任务。
-func (c *Client) Update(ctx context.Context, service string) (*CreateUpdateResult, error) {
-	return c.createServiceJob(ctx, "/update", service)
+func (c *Client) Update(ctx context.Context) (*CreateUpdateResult, error) {
+	return c.createComposeJob(ctx, "/update")
 }
 
 // Restart 调用 POST /restart，异步创建重启任务。
-func (c *Client) Restart(ctx context.Context, service string) (*CreateUpdateResult, error) {
-	return c.createServiceJob(ctx, "/restart", service)
+func (c *Client) Restart(ctx context.Context) (*CreateUpdateResult, error) {
+	return c.createComposeJob(ctx, "/restart")
 }
 
-func (c *Client) createServiceJob(ctx context.Context, path string, service string) (*CreateUpdateResult, error) {
-	payload, err := json.Marshal(map[string]string{"service": service})
-	if err != nil {
-		return nil, err
-	}
-	status, env, _, err := c.doRequest(ctx, http.MethodPost, path, bytes.NewReader(payload), "application/json")
+func (c *Client) createComposeJob(ctx context.Context, path string) (*CreateUpdateResult, error) {
+	status, env, _, err := c.doRequest(ctx, http.MethodPost, path, bytes.NewReader([]byte("{}")), "application/json")
 	if err != nil {
 		return nil, err
 	}
@@ -133,26 +129,32 @@ func (c *Client) createServiceJob(ctx context.Context, path string, service stri
 	}
 	// 成功创建
 	var created struct {
-		JobID   string    `json:"job_id"`
-		Service string    `json:"service"`
-		Action  JobAction `json:"action"`
+		JobID    string    `json:"job_id"`
+		Services []string  `json:"services"`
+		Action   JobAction `json:"action"`
 	}
 	if err := json.Unmarshal(env.Data, &created); err == nil && created.JobID != "" {
 		out.JobID = created.JobID
-		out.Service = created.Service
+		out.Services = created.Services
 		out.Action = created.Action
 		return out, nil
 	}
 	// 409 冲突
 	var conflict struct {
-		ExistingJobID string    `json:"existing_job_id"`
-		Service       string    `json:"service"`
-		Action        JobAction `json:"action"`
-		Status        JobStatus `json:"status"`
+		ExistingJobID     string    `json:"existing_job_id"`
+		ExistingServices  []string  `json:"existing_services"`
+		RequestedServices []string  `json:"requested_services"`
+		Services          []string  `json:"services"`
+		Action            JobAction `json:"action"`
+		Status            JobStatus `json:"status"`
 	}
 	if err := json.Unmarshal(env.Data, &conflict); err == nil && conflict.ExistingJobID != "" {
 		out.ExistingJobID = conflict.ExistingJobID
-		out.ExistingService = conflict.Service
+		out.ExistingServices = conflict.ExistingServices
+		if len(out.ExistingServices) == 0 {
+			out.ExistingServices = conflict.Services
+		}
+		out.RequestedServices = conflict.RequestedServices
 		out.ExistingAction = conflict.Action
 		out.ExistingStatus = conflict.Status
 	}

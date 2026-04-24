@@ -24,7 +24,7 @@ const (
 // Job 表示一次异步服务任务。
 type Job struct {
 	ID         string     `json:"id"`
-	Service    string     `json:"service"`
+	Services   []string   `json:"services"`
 	Action     Action     `json:"action"`
 	Status     Status     `json:"status"`
 	Message    string     `json:"message,omitempty"`

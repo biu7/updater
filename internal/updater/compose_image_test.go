@@ -26,3 +26,17 @@ func TestImageRefFromComposeConfig(t *testing.T) {
 		t.Fatal("不存在的服务应失败")
 	}
 }
+
+func TestServiceNamesFromComposeConfig(t *testing.T) {
+	root := map[string]any{
+		"services": map[string]any{
+			"worker": map[string]any{},
+			" api ":  map[string]any{},
+			"":       map[string]any{},
+		},
+	}
+	got := serviceNamesFromComposeConfig(root)
+	if len(got) != 2 || got[0] != "api" || got[1] != "worker" {
+		t.Fatalf("serviceNamesFromComposeConfig() = %#v, want [api worker]", got)
+	}
+}

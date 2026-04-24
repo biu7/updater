@@ -57,15 +57,16 @@ type CreateUpdateResult struct {
 	Detail     string
 
 	// 创建成功时（code=200 且 HTTP 200）
-	JobID   string
-	Service string
-	Action  JobAction
+	JobID    string
+	Services []string
+	Action   JobAction
 
 	// 409 冲突时
-	ExistingJobID   string
-	ExistingService string
-	ExistingAction  JobAction
-	ExistingStatus  JobStatus
+	ExistingJobID     string
+	ExistingServices  []string
+	RequestedServices []string
+	ExistingAction    JobAction
+	ExistingStatus    JobStatus
 }
 
 // Created 是否已成功创建异步任务（可拿到 job_id）。
@@ -73,12 +74,12 @@ func (r *CreateUpdateResult) Created() bool {
 	return r.Code == CodeOK && r.HTTPStatus == 200 && r.JobID != ""
 }
 
-// Conflict 是否为同服务已有进行中任务（409 / code=40901）。
+// Conflict 是否为目标服务集合中已有进行中任务（409 / code=40901）。
 func (r *CreateUpdateResult) Conflict() bool {
 	return r.Code == CodeJobConflict || r.HTTPStatus == 409
 }
 
-// Forbidden 是否因服务不在白名单被拒绝（403 / code=40301）。
+// Forbidden 是否因当前 compose 中无允许执行的服务被拒绝（403 / code=40301）。
 func (r *CreateUpdateResult) Forbidden() bool {
 	return r.Code == CodeServiceForbidden || r.HTTPStatus == 403
 }

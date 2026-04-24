@@ -17,26 +17,26 @@ func TestFriendlySuccessMessage(t *testing.T) {
 	}{
 		{
 			name:   "镜像未变化",
-			raw:    "pull 后镜像 ID 未变化，已跳过重启",
+			raw:    "所有服务 pull 后镜像 ID 均未变化，已跳过重启",
 			want:   "未检测到需要更新的版本，已跳过本次更新",
 			action: jobs.ActionUpdate,
 		},
 		{
 			name:   "成功更新",
-			raw:    "更新已完成（已执行 pull 与 up -d）",
-			want:   "检测到新版本，更新已完成",
+			raw:    "更新已完成（已执行 pull 与 up -d，检测到更新的服务：api,worker）",
+			want:   "更新已完成",
 			action: jobs.ActionUpdate,
 		},
 		{
 			name:   "结果不确定",
-			raw:    "无法确认是否已拉取到新镜像，已跳过重启",
+			raw:    "无法确认部分服务 pull 后镜像是否已更新，已跳过重启",
 			want:   "暂时无法确认是否存在可更新版本，已跳过本次更新",
 			action: jobs.ActionUpdate,
 		},
 		{
 			name:   "成功重启",
 			raw:    "重启已完成（已执行 restart）",
-			want:   "服务重启已完成",
+			want:   "重启已完成",
 			action: jobs.ActionRestart,
 		},
 	}
@@ -54,10 +54,10 @@ func TestBuildJobResponseSkipped(t *testing.T) {
 	now := time.Now().UTC()
 	httpStatus, code, message, detail, data := buildJobResponse(&jobs.Job{
 		ID:         "job-1",
-		Service:    "transfer",
+		Services:   []string{"transfer", "worker"},
 		Action:     jobs.ActionUpdate,
 		Status:     jobs.StatusSkipped,
-		Message:    "pull 后镜像 ID 未变化，已跳过重启",
+		Message:    "所有服务 pull 后镜像 ID 均未变化，已跳过重启",
 		LogTail:    "pull log",
 		CreatedAt:  now,
 		FinishedAt: &now,
@@ -88,13 +88,16 @@ func TestBuildJobResponseSkipped(t *testing.T) {
 	if job.LogTail != "pull log" {
 		t.Fatalf("job log tail = %q, want pull log", job.LogTail)
 	}
+	if len(job.Services) != 2 || job.Services[0] != "transfer" || job.Services[1] != "worker" {
+		t.Fatalf("job services = %#v", job.Services)
+	}
 }
 
 func TestBuildJobResponseSucceeded(t *testing.T) {
 	now := time.Now().UTC()
 	httpStatus, code, message, detail, data := buildJobResponse(&jobs.Job{
 		ID:         "job-3",
-		Service:    "transfer",
+		Services:   []string{"transfer", "worker"},
 		Action:     jobs.ActionRestart,
 		Status:     jobs.StatusSucceeded,
 		Message:    "重启已完成（已执行 restart）",
@@ -109,7 +112,7 @@ func TestBuildJobResponseSucceeded(t *testing.T) {
 	if code != successCode {
 		t.Fatalf("code = %d, want %d", code, successCode)
 	}
-	if message != "服务重启已完成" {
+	if message != "重启已完成" {
 		t.Fatalf("message = %q", message)
 	}
 	if detail != "" {
@@ -131,7 +134,7 @@ func TestBuildJobResponseFailed(t *testing.T) {
 	now := time.Now().UTC()
 	httpStatus, code, message, detail, data := buildJobResponse(&jobs.Job{
 		ID:         "job-2",
-		Service:    "transfer",
+		Services:   []string{"transfer", "worker"},
 		Action:     jobs.ActionRestart,
 		Status:     jobs.StatusFailed,
 		Error:      "docker compose restart: exit status 1",
@@ -156,8 +159,8 @@ func TestBuildJobResponseFailed(t *testing.T) {
 	if !ok {
 		t.Fatalf("data type = %T, want jobData", data)
 	}
-	if job.Service != "transfer" {
-		t.Fatalf("job service = %q, want transfer", job.Service)
+	if len(job.Services) != 2 || job.Services[0] != "transfer" {
+		t.Fatalf("job services = %#v", job.Services)
 	}
 	if job.Error != "docker compose restart: exit status 1" {
 		t.Fatalf("job error = %q", job.Error)

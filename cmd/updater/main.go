@@ -33,7 +33,16 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("updater 监听 %s，项目目录 %s", cfg.Addr(), cfg.ComposeProjectDir)
+		if cfg.ComposeProjectDirectory != "" {
+			log.Printf(
+				"updater 监听 %s，项目目录 %s，compose --project-directory=%s",
+				cfg.Addr(),
+				cfg.ComposeProjectDir,
+				cfg.ComposeProjectDirectory,
+			)
+		} else {
+			log.Printf("updater 监听 %s，项目目录 %s", cfg.Addr(), cfg.ComposeProjectDir)
+		}
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("HTTP 服务异常退出: %v", err)
 		}

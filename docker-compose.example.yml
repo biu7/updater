@@ -12,6 +12,8 @@ services:
       PORT: "8080"
       # 容器内能看到的主 compose 项目目录（需与下方卷挂载一致）
       COMPOSE_PROJECT_DIR: /workspace/stack
+      # 可选：宿主机真实项目目录，等价于 docker compose --project-directory
+      # COMPOSE_PROJECT_DIRECTORY: /path/on/host/to/your/compose-project
       # 若使用非默认文件名，可指定，多个文件用逗号分隔
       # COMPOSE_FILE: docker-compose.yml,override.yml
       # 可选：仅允许更新的服务名，逗号分隔

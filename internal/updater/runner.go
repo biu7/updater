@@ -40,6 +40,9 @@ func NewRunner(cfg config.Config) *Runner {
 // composeBaseArgs 生成 docker compose 的固定前缀参数（含可选 -f）。
 func (r *Runner) composeBaseArgs() []string {
 	args := []string{"compose"}
+	if r.cfg.ComposeProjectDirectory != "" {
+		args = append(args, "--project-directory", r.cfg.ComposeProjectDirectory)
+	}
 	for _, f := range r.cfg.ComposeFiles {
 		args = append(args, "-f", f)
 	}

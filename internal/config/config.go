@@ -2,7 +2,9 @@
 package config
 
 import (
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -11,15 +13,21 @@ import (
 
 // Config 从环境变量加载的运行时配置。
 type Config struct {
-	Port              string
-	ComposeProjectDir string
-	ComposeFiles      []string // 可选，对应 COMPOSE_FILE，支持逗号分隔多个文件
-	AllowedServices   map[string]struct{}
-	UpdateTimeout     time.Duration
+	Port                    string
+	ComposeProjectDir       string
+	ComposeProjectDirectory string   // 可选，对应 docker compose --project-directory
+	ComposeFiles            []string // 可选，对应 COMPOSE_FILE，支持逗号分隔多个文件
+	AllowedServices         map[string]struct{}
+	UpdateTimeout           time.Duration
 }
 
 // Load 读取环境变量并返回配置；缺少必填项时返回错误。
 func Load() (Config, error) {
+	return LoadFromArgs(os.Args[1:])
+}
+
+// LoadFromArgs 读取环境变量与命令行参数并返回配置。
+func LoadFromArgs(args []string) (Config, error) {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -28,6 +36,17 @@ func Load() (Config, error) {
 	dir := os.Getenv("COMPOSE_PROJECT_DIR")
 	if dir == "" {
 		dir = "/workspace/compose-project"
+	}
+
+	composeProjectDirectory := strings.TrimSpace(os.Getenv("COMPOSE_PROJECT_DIRECTORY"))
+	flagSet := flag.NewFlagSet("updater", flag.ContinueOnError)
+	projectDirectoryFlag := flagSet.String("project-directory", "", "docker compose 的 --project-directory 参数")
+	flagSet.SetOutput(io.Discard)
+	if err := flagSet.Parse(args); err != nil {
+		return Config{}, err
+	}
+	if v := strings.TrimSpace(*projectDirectoryFlag); v != "" {
+		composeProjectDirectory = v
 	}
 
 	var files []string
@@ -60,11 +79,12 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Port:              port,
-		ComposeProjectDir: dir,
-		ComposeFiles:      files,
-		AllowedServices:   allowed,
-		UpdateTimeout:     timeout,
+		Port:                    port,
+		ComposeProjectDir:       dir,
+		ComposeProjectDirectory: composeProjectDirectory,
+		ComposeFiles:            files,
+		AllowedServices:         allowed,
+		UpdateTimeout:           timeout,
 	}, nil
 }
 

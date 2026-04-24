@@ -10,6 +10,7 @@
 |-----------------------|-----------------------------------|------------------------------|
 | `PORT`                | 监听地址，可为 `8080` 或 `127.0.0.1:8080` | `8080`                       |
 | `COMPOSE_PROJECT_DIR` | compose 项目根目录（工作目录）               | `/workspace/compose-project` |
+| `COMPOSE_PROJECT_DIRECTORY` | 可选，透传到 `docker compose --project-directory`，用于宿主机/容器路径不一致场景 | 无（不传该参数） |
 | `COMPOSE_FILE`        | 可选，compose 文件路径，多个用逗号分隔           | 无（使用项目默认）                    |
 | `ALLOWED_SERVICES`    | 可选，允许更新的服务名白名单，逗号分隔               | 无（不限制）                       |
 | `UPDATE_TIMEOUT`      | 单次任务超时，Go duration 格式             | `10m`                        |
@@ -150,6 +151,8 @@ func example() error {
 ```bash
 go build -o updater ./cmd/updater
 PORT=8080 COMPOSE_PROJECT_DIR=/path/to/compose ./updater
+# 或通过命令行显式传递 docker compose 的 project directory
+PORT=8080 COMPOSE_PROJECT_DIR=/container/path ./updater --project-directory /host/path
 ```
 
 ## Docker 镜像

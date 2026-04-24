@@ -70,6 +70,21 @@ func TestRunnerUpdateService_SkipWhenImageIDUnchanged(t *testing.T) {
 	}
 }
 
+func TestRunnerComposeBaseArgs_WithProjectDirectory(t *testing.T) {
+	r := &Runner{
+		cfg: config.Config{
+			ComposeProjectDirectory: "/host/project",
+			ComposeFiles:            []string{"docker-compose.yml"},
+		},
+	}
+
+	got := r.composeBaseArgs()
+	want := []string{"compose", "--project-directory", "/host/project", "-f", "docker-compose.yml"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("composeBaseArgs() = %#v, want %#v", got, want)
+	}
+}
+
 func TestRunnerUpdateService_RunUpWhenImageIDChanged(t *testing.T) {
 	var gotArgs [][]string
 	ids := []string{"sha256:old", "sha256:new"}

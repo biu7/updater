@@ -93,3 +93,19 @@ jobs:
           cache-from: type=registry,ref=${{ needs.prepare.outputs.image_name }}:buildcache
           cache-to: type=registry,ref=${{ needs.prepare.outputs.image_name }}:buildcache,mode=max
           provenance: false
+
+  cleanup:
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: 清理 GHCR 历史镜像
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          keep-n-tagged: 10
+          delete-untagged: true
+          exclude-tags: latest,buildcache

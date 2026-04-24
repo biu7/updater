@@ -19,9 +19,10 @@ import (
 type Runner struct {
 	cfg config.Config
 
-	runFn               func(ctx context.Context, args []string, logSink io.Writer) error
-	composeConfigRootFn func(ctx context.Context) (map[string]any, error)
-	localImageIDFn      func(ctx context.Context, imageRef string) (string, error)
+	runFn                    func(ctx context.Context, args []string, logSink io.Writer) error
+	composeConfigRootFn      func(ctx context.Context) (map[string]any, error)
+	localImageIDFn           func(ctx context.Context, imageRef string) (string, error)
+	runningServiceImageIDsFn func(ctx context.Context, service string) ([]string, error)
 }
 
 var (
@@ -70,9 +71,8 @@ func (r *Runner) ResolveTargetServices(ctx context.Context) ([]string, error) {
 	return targets, nil
 }
 
-// UpdateServices 先 pull，再仅在“明确确认已拿到新镜像”时执行 up -d。
-// 优先根据 pull 前后镜像 ID 是否变化判断；
-// 若部分服务无法可靠确认结果，则仅在至少一个服务明确更新时才执行 up -d。
+// UpdateServices 先 pull，再仅在“本地最新镜像尚未被当前容器实际使用”时执行 up -d。
+// 这既覆盖新镜像刚被拉取的场景，也覆盖上次 up -d 失败导致容器仍停留在旧镜像的场景。
 func (r *Runner) UpdateServices(ctx context.Context, services []string) (message string, log string, err error) {
 	var buf cappedBuffer
 	w := io.MultiWriter(&buf)
@@ -126,7 +126,7 @@ func (r *Runner) UpdateServices(ctx context.Context, services []string) (message
 		return "", buf.String(), fmt.Errorf("docker compose pull: %w", e)
 	}
 
-	changedServices := make([]string, 0)
+	servicesNeedingUp := make([]string, 0)
 	uncertainServices := make([]string, 0)
 	for _, state := range imageStates {
 		idAfter, errAfter := r.localImageID(ctx, state.imageRef)
@@ -136,14 +136,34 @@ func (r *Runner) UpdateServices(ctx context.Context, services []string) (message
 			continue
 		}
 		fmt.Fprintf(w, "[updater] 服务 %q pull 后本地镜像 ID: %s\n", state.service, idAfter)
+
+		runningImageIDs, errRunning := r.runningServiceImageIDs(ctx, state.service)
+		if errRunning != nil {
+			fmt.Fprintf(w, "[updater] 警告: 服务 %q 无法读取当前容器镜像 ID，无法确认是否需要执行 up -d: %v\n", state.service, errRunning)
+			uncertainServices = append(uncertainServices, state.service)
+			continue
+		}
+		if len(runningImageIDs) == 0 {
+			fmt.Fprintf(w, "[updater] 服务 %q 当前没有已创建的 compose 容器，需要执行 up -d 以应用本地镜像\n", state.service)
+			servicesNeedingUp = append(servicesNeedingUp, state.service)
+			continue
+		}
+		fmt.Fprintf(w, "[updater] 服务 %q 当前容器镜像 ID: %s\n", state.service, strings.Join(runningImageIDs, ","))
+		if len(runningImageIDs) != 1 || runningImageIDs[0] != idAfter {
+			fmt.Fprintf(w, "[updater] 服务 %q 当前容器尚未全部使用本地最新镜像，需要执行 up -d\n", state.service)
+			servicesNeedingUp = append(servicesNeedingUp, state.service)
+			continue
+		}
 		if state.idBefore == "" || state.idBefore != idAfter {
-			changedServices = append(changedServices, state.service)
+			fmt.Fprintf(w, "[updater] 服务 %q pull 后镜像已更新，且运行容器已使用该镜像\n", state.service)
+		} else {
+			fmt.Fprintf(w, "[updater] 服务 %q 本地镜像与运行容器镜像一致，无需执行 up -d\n", state.service)
 		}
 	}
 
 	combined := buf.String()
 
-	if len(changedServices) == 0 {
+	if len(servicesNeedingUp) == 0 {
 		if len(imageStates) == 0 {
 			if PullIndicatesNoNewImage(combined) {
 				return "本次 pull 未发现可更新镜像（输出判定），已跳过重启", combined, nil
@@ -166,8 +186,8 @@ func (r *Runner) UpdateServices(ctx context.Context, services []string) (message
 	if e := r.run(ctx, upArgs, w2); e != nil {
 		return "", buf2.String(), fmt.Errorf("docker compose up -d: %w", e)
 	}
-	slices.Sort(changedServices)
-	return fmt.Sprintf("更新已完成（已执行 pull 与 up -d，检测到更新的服务：%s）", strings.Join(changedServices, ",")), buf2.String(), nil
+	slices.Sort(servicesNeedingUp)
+	return fmt.Sprintf("更新已完成（已执行 pull 与 up -d，需要应用镜像的服务：%s）", strings.Join(servicesNeedingUp, ",")), buf2.String(), nil
 }
 
 // UpdateService 兼容单服务调用。
@@ -232,6 +252,13 @@ func (r *Runner) localImageID(ctx context.Context, imageRef string) (string, err
 		return r.localImageIDFn(ctx, imageRef)
 	}
 	return r.localImageIDExec(ctx, imageRef)
+}
+
+func (r *Runner) runningServiceImageIDs(ctx context.Context, service string) ([]string, error) {
+	if r.runningServiceImageIDsFn != nil {
+		return r.runningServiceImageIDsFn(ctx, service)
+	}
+	return r.runningServiceImageIDsExec(ctx, service)
 }
 
 // cappedBuffer 限制总长度，仅保留末尾一段，避免内存无限增长。

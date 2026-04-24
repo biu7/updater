@@ -23,7 +23,7 @@ func TestFriendlySuccessMessage(t *testing.T) {
 		},
 		{
 			name:   "成功更新",
-			raw:    "更新已完成（已执行 pull 与 up -d，检测到更新的服务：api,worker）",
+			raw:    "更新已完成（已执行 pull 与 up -d，需要应用镜像的服务：api,worker）",
 			want:   "更新已完成",
 			action: jobs.ActionUpdate,
 		},

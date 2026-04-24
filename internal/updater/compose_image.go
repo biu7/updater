@@ -78,3 +78,68 @@ func (r *Runner) localImageIDExec(ctx context.Context, imageRef string) (string,
 	}
 	return strings.TrimSpace(string(out)), nil
 }
+
+// runningServiceImageIDsExec 返回 compose 服务当前容器实际使用的镜像 ID 列表。
+func (r *Runner) runningServiceImageIDsExec(ctx context.Context, service string) ([]string, error) {
+	if strings.TrimSpace(service) == "" {
+		return nil, fmt.Errorf("服务名为空")
+	}
+	args := append(r.composeBaseArgs(), "ps", "-q", service)
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Dir = r.cfg.ComposeProjectDir
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker compose ps -q %s: %w", service, err)
+	}
+	containerIDs := splitNonEmptyLines(string(out))
+	if len(containerIDs) == 0 {
+		return nil, nil
+	}
+
+	inspectArgs := append([]string{"inspect", "-f", "{{.Image}}"}, containerIDs...)
+	inspectCmd := exec.CommandContext(ctx, "docker", inspectArgs...)
+	inspectOut, err := inspectCmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker inspect service %s containers: %w", service, err)
+	}
+	return normalizeImageIDs(splitNonEmptyLines(string(inspectOut))), nil
+}
+
+// splitNonEmptyLines 将多行输出转为去空白后的切片。
+func splitNonEmptyLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, "\n")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
+}
+
+// normalizeImageIDs 去重并排序镜像 ID，便于稳定比较。
+func normalizeImageIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	slices.Sort(out)
+	return out
+}

@@ -33,6 +33,12 @@ func TestRunnerUpdateService_SkipWhenImageIDUnchanged(t *testing.T) {
 			idCalls++
 			return "sha256:same", nil
 		},
+		runningServiceImageIDsFn: func(ctx context.Context, service string) ([]string, error) {
+			if service != "web" {
+				t.Fatalf("unexpected service: %s", service)
+			}
+			return []string{"sha256:same"}, nil
+		},
 		runFn: func(ctx context.Context, args []string, logSink io.Writer) error {
 			gotArgs = append(gotArgs, append([]string(nil), args...))
 			_, _ = io.WriteString(logSink, "pull output\n")
@@ -87,6 +93,12 @@ func TestRunnerUpdateService_RunUpWhenImageIDChanged(t *testing.T) {
 			ids = ids[1:]
 			return id, nil
 		},
+		runningServiceImageIDsFn: func(ctx context.Context, service string) ([]string, error) {
+			if service != "api" {
+				t.Fatalf("unexpected service: %s", service)
+			}
+			return []string{"sha256:old"}, nil
+		},
 		runFn: func(ctx context.Context, args []string, logSink io.Writer) error {
 			gotArgs = append(gotArgs, append([]string(nil), args...))
 			if len(gotArgs) == 1 {
@@ -102,7 +114,7 @@ func TestRunnerUpdateService_RunUpWhenImageIDChanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateService() error = %v", err)
 	}
-	if msg != "更新已完成（已执行 pull 与 up -d，检测到更新的服务：api）" {
+	if msg != "更新已完成（已执行 pull 与 up -d，需要应用镜像的服务：api）" {
 		t.Fatalf("unexpected message: %q", msg)
 	}
 	wantArgs := [][]string{
@@ -136,6 +148,10 @@ func TestRunnerUpdateService_SkipBuildOnlyServiceByPullOutput(t *testing.T) {
 		localImageIDFn: func(ctx context.Context, imageRef string) (string, error) {
 			t.Fatalf("build-only service should not inspect image ID")
 			return "", nil
+		},
+		runningServiceImageIDsFn: func(ctx context.Context, service string) ([]string, error) {
+			t.Fatalf("build-only service should not inspect running container image ID")
+			return nil, nil
 		},
 		runFn: func(ctx context.Context, args []string, logSink io.Writer) error {
 			gotArgs = append(gotArgs, append([]string(nil), args...))
@@ -181,6 +197,10 @@ func TestRunnerUpdateService_SkipWhenImageIDCannotBeConfirmed(t *testing.T) {
 			}
 			return "", fmt.Errorf("inspect failed")
 		},
+		runningServiceImageIDsFn: func(ctx context.Context, service string) ([]string, error) {
+			t.Fatalf("should not inspect running containers when local image ID cannot be confirmed")
+			return nil, nil
+		},
 		runFn: func(ctx context.Context, args []string, logSink io.Writer) error {
 			gotArgs = append(gotArgs, append([]string(nil), args...))
 			_, _ = io.WriteString(logSink, "pull output\n")
@@ -213,6 +233,10 @@ func TestRunnerUpdateService_SkipWhenPullOutputIsUncertain(t *testing.T) {
 		localImageIDFn: func(ctx context.Context, imageRef string) (string, error) {
 			t.Fatalf("service without confirmed image ref should not inspect image ID")
 			return "", nil
+		},
+		runningServiceImageIDsFn: func(ctx context.Context, service string) ([]string, error) {
+			t.Fatalf("service without confirmed image ref should not inspect running container image ID")
+			return nil, nil
 		},
 		runFn: func(ctx context.Context, args []string, logSink io.Writer) error {
 			gotArgs = append(gotArgs, append([]string(nil), args...))
@@ -380,6 +404,9 @@ func TestRunnerUpdateServices_ResolveWhenServicesEmpty(t *testing.T) {
 		localImageIDFn: func(ctx context.Context, imageRef string) (string, error) {
 			return "sha256:same", nil
 		},
+		runningServiceImageIDsFn: func(ctx context.Context, service string) ([]string, error) {
+			return []string{"sha256:same"}, nil
+		},
 		runFn: func(ctx context.Context, args []string, logSink io.Writer) error {
 			gotArgs = append(gotArgs, append([]string(nil), args...))
 			_, _ = io.WriteString(logSink, "pull output\n")
@@ -399,6 +426,64 @@ func TestRunnerUpdateServices_ResolveWhenServicesEmpty(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("run args = %#v, want %#v", gotArgs, wantArgs)
+	}
+}
+
+func TestRunnerUpdateService_RunUpWhenRunningContainerStillUsesOldImage(t *testing.T) {
+	var gotArgs [][]string
+	idCalls := 0
+	r := &Runner{
+		cfg: config.Config{},
+		composeConfigRootFn: func(ctx context.Context) (map[string]any, error) {
+			return map[string]any{
+				"services": map[string]any{
+					"api": map[string]any{"image": "repo/api:latest"},
+				},
+			}, nil
+		},
+		localImageIDFn: func(ctx context.Context, imageRef string) (string, error) {
+			if imageRef != "repo/api:latest" {
+				t.Fatalf("unexpected image ref: %s", imageRef)
+			}
+			idCalls++
+			return "sha256:new", nil
+		},
+		runningServiceImageIDsFn: func(ctx context.Context, service string) ([]string, error) {
+			if service != "api" {
+				t.Fatalf("unexpected service: %s", service)
+			}
+			return []string{"sha256:old"}, nil
+		},
+		runFn: func(ctx context.Context, args []string, logSink io.Writer) error {
+			gotArgs = append(gotArgs, append([]string(nil), args...))
+			if len(gotArgs) == 1 {
+				_, _ = io.WriteString(logSink, "pull output\n")
+			} else {
+				_, _ = io.WriteString(logSink, "up output\n")
+			}
+			return nil
+		},
+	}
+
+	msg, logTail, err := r.UpdateServices(context.Background(), []string{"api"})
+	if err != nil {
+		t.Fatalf("UpdateService() error = %v", err)
+	}
+	if msg != "更新已完成（已执行 pull 与 up -d，需要应用镜像的服务：api）" {
+		t.Fatalf("unexpected message: %q", msg)
+	}
+	if idCalls != 2 {
+		t.Fatalf("localImageID calls = %d, want 2", idCalls)
+	}
+	wantArgs := [][]string{
+		{"compose", "pull", "api"},
+		{"compose", "up", "-d", "api"},
+	}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("run args = %#v, want %#v", gotArgs, wantArgs)
+	}
+	if !strings.Contains(logTail, "当前容器尚未全部使用本地最新镜像") {
+		t.Fatalf("log tail should mention stale running container: %q", logTail)
 	}
 }
 

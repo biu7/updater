@@ -59,7 +59,7 @@ func TestUpdate_Created(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := client.NewWithBaseURL(srv.URL)
-	res, err := c.Update(context.Background(), []string{"api", "worker"})
+	res, err := c.Update(context.Background(), "api", "worker")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestUpdate_Conflict(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := client.NewWithBaseURL(srv.URL)
-	res, err := c.Update(context.Background(), []string{"api", "worker"})
+	res, err := c.Update(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,5 +212,24 @@ func TestNew_EmptyBaseURL(t *testing.T) {
 	_, err := client.New(client.Config{BaseURL: "  "})
 	if err == nil {
 		t.Fatal("期望错误")
+	}
+}
+
+func TestUpdate_NoServicesSendsEmptyObject(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if r.URL.Path != "/update" || string(body) != `{}` {
+			t.Errorf("path=%s body=%s", r.URL.Path, body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"code": 200, "data": map[string]interface{}{"job_id": "j2", "services": []string{"api"}, "action": "update"},
+		})
+	}))
+	defer srv.Close()
+
+	c, _ := client.NewWithBaseURL(srv.URL)
+	res, err := c.Update(context.Background())
+	if err != nil || !res.Created() {
+		t.Fatalf("res=%+v err=%v", res, err)
 	}
 }

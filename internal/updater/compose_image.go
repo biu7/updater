@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"time"
 )
 
 // composeConfigRootExec 执行 docker compose config --format json 并解析为通用 map。
@@ -69,7 +70,7 @@ func (r *Runner) localImageIDExec(ctx context.Context, imageRef string) (string,
 	if imageRef == "" {
 		return "", fmt.Errorf("镜像引用为空")
 	}
-	out, err := r.output(ctx, []string{"image", "inspect", imageRef, "-f", "{{.Id}}"})
+	out, err := r.output(ctx, []string{"image", "inspect", "-f", "{{.Id}}", "--", imageRef})
 	if err != nil {
 		return "", err
 	}
@@ -90,12 +91,15 @@ func (r *Runner) runningServiceImageIDsExec(ctx context.Context, service string)
 		return nil, nil
 	}
 
-	inspectOut, err := r.output(ctx, append([]string{"inspect", "-f", "{{.Image}}"}, containerIDs...))
+	inspectOut, err := r.output(ctx, append([]string{"inspect", "-f", "{{.Image}}", "--"}, containerIDs...))
 	if err != nil {
 		return nil, fmt.Errorf("docker inspect service %s containers: %w", service, err)
 	}
 	return normalizeImageIDs(splitNonEmptyLines(string(inspectOut))), nil
 }
+
+// cmdWaitDelay 限制 ctx 取消后等待子进程及其输出管道关闭的时间，避免孙进程持有管道导致无限等待。
+const cmdWaitDelay = 5 * time.Second
 
 // output 执行 docker 子命令并返回 stdout；失败时错误中附带截断后的 stderr。
 func (r *Runner) output(ctx context.Context, args []string) ([]byte, error) {
@@ -104,6 +108,7 @@ func (r *Runner) output(ctx context.Context, args []string) ([]byte, error) {
 	}
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = r.cfg.ComposeProjectDir
+	cmd.WaitDelay = cmdWaitDelay
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

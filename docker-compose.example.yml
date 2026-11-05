@@ -12,15 +12,22 @@ services:
       PORT: "8080"
       # 同路径挂载：容器内项目目录与宿主路径一致，compose 相对路径（卷、secrets、env_file）才能解析为正确的宿主路径。
       COMPOSE_PROJECT_DIR: ${DEPLOY_DIR:?}
-      # 可选：仅允许操作的服务名，逗号分隔
+      # 仅允许操作的服务名，逗号分隔；必须排除 updater 自身
       ALLOWED_SERVICES: web,api
       # 不要设置 COMPOSE_FILE / COMPOSE_PROJECT_NAME。
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${DEPLOY_DIR:?}:${DEPLOY_DIR}:ro
-      # 私有 registry：宿主 root 的 docker config 单文件只读挂入（不能使用 credsStore/credHelpers）。
+      # 宿主 root 的 docker config 单文件只读挂入（不能使用 credsStore/credHelpers）。
+      # 文件必须事先存在：私有 registry 先 docker login；只用公开镜像时可创建内容为 {} 的文件。
+      # create_host_path: false 防止文件缺失时被自动创建成目录。
       # 重新 docker login 后需 docker compose up -d --force-recreate updater。
-      - ${DOCKER_CONFIG_FILE:-/root/.docker/config.json}:/root/.docker/config.json:ro
+      - type: bind
+        source: ${UPDATER_DOCKER_CONFIG:-/root/.docker/config.json}
+        target: /root/.docker/config.json
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - updater
     restart: unless-stopped

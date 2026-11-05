@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -25,6 +27,7 @@ const (
 	CheckErrImageRefMissing     = "image_ref_missing"
 	CheckErrNotRunning          = "not_running"
 	CheckErrLocalInspect        = "local_inspect_failed"
+	CheckErrTimeout             = "timeout" // 整体期限耗尽导致本地读取失败
 	CheckErrRemoteTimeout       = "remote_timeout"
 	CheckErrRemoteAuth          = "remote_auth_failed"
 	CheckErrRemoteNotFound      = "remote_not_found"
@@ -109,6 +112,8 @@ func (r *Runner) checkService(ctx context.Context, res *CheckResult) {
 		res.CurrentVersion = local[0].version
 	}
 	switch {
+	case localErr != "" && errors.Is(ctx.Err(), context.DeadlineExceeded):
+		res.ErrorCode = CheckErrTimeout
 	case localErr != "":
 		res.ErrorCode = localErr
 	case remoteErr != "":
@@ -149,7 +154,7 @@ func (r *Runner) runningImages(ctx context.Context, service string) ([]localImag
 	if len(ids) == 0 {
 		return nil, CheckErrNotRunning
 	}
-	out, err := r.output(ctx, append([]string{"image", "inspect"}, ids...))
+	out, err := r.output(ctx, append([]string{"image", "inspect", "--"}, ids...))
 	if err != nil {
 		return nil, CheckErrLocalInspect
 	}
@@ -170,7 +175,7 @@ func (r *Runner) runningImages(ctx context.Context, service string) ([]localImag
 
 // remoteImage 通过 buildx imagetools 读取远程 index/manifest digest 与版本。
 func (r *Runner) remoteImage(ctx context.Context, ref string) (digest, version, errCode string) {
-	out, err := r.output(ctx, []string{"buildx", "imagetools", "inspect", "--format", "{{json .}}", ref})
+	out, err := r.output(ctx, []string{"buildx", "imagetools", "inspect", "--format", "{{json .}}", "--", ref})
 	if err != nil {
 		return "", "", classifyRemoteError(ctx, err)
 	}
@@ -220,18 +225,36 @@ func remoteImageConfig(raw json.RawMessage) (imageConfig, bool) {
 	return imageConfig{}, false
 }
 
+var (
+	reRemoteAuth     = regexp.MustCompile(`(?i)\b40[13]\b|unauthorized|authentication required|insufficient_scope|failed to authorize|access denied|denied: `)
+	reRemoteNotFound = regexp.MustCompile(`(?i)\b404\b|manifest unknown|name unknown|: not found`)
+)
+
+// classifyRemoteError 把 buildx imagetools 失败归类为稳定错误码。
+// 本地问题（如 docker.sock permission denied、executable file not found）归为 remote_unavailable。
 func classifyRemoteError(ctx context.Context, err error) string {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
 		return CheckErrRemoteTimeout
 	}
-	msg := strings.ToLower(fmt.Sprint(err))
+	msg := fmt.Sprint(err)
 	switch {
-	case strings.Contains(msg, "unauthorized"), strings.Contains(msg, "authorize"),
-		strings.Contains(msg, "denied"), strings.Contains(msg, "401"), strings.Contains(msg, "403"):
+	case errors.Is(err, exec.ErrNotFound), containsAnyFold(msg, "permission denied", "executable file not found"):
+		return CheckErrRemoteUnavailable
+	case reRemoteAuth.MatchString(msg):
 		return CheckErrRemoteAuth
-	case strings.Contains(msg, "not found"), strings.Contains(msg, "manifest unknown"):
+	case reRemoteNotFound.MatchString(msg):
 		return CheckErrRemoteNotFound
 	default:
 		return CheckErrRemoteUnavailable
 	}
+}
+
+func containsAnyFold(s string, subs ...string) bool {
+	s = strings.ToLower(s)
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }

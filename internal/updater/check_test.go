@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -40,9 +41,9 @@ func (f *fakeCheck) runner() *Runner {
 		},
 		outputFn: func(ctx context.Context, args []string) ([]byte, error) {
 			switch {
-			case len(args) >= 2 && args[0] == "image" && args[1] == "inspect":
+			case len(args) >= 2 && args[0] == "image" && args[1] == "inspect" && args[2] == "--":
 				var out []map[string]any
-				for _, id := range args[2:] {
+				for _, id := range args[3:] { // image inspect -- <ids…>
 					img, ok := f.images[id]
 					if !ok {
 						return nil, fmt.Errorf("no such image %s", id)
@@ -196,6 +197,15 @@ func TestCheck_RemoteFailuresAreNullWithCode(t *testing.T) {
 		{"timeout", context.DeadlineExceeded, "", CheckErrRemoteTimeout},
 		{"network", errors.New("exit status 1: dial tcp: lookup ghcr.io: no such host"), "", CheckErrRemoteUnavailable},
 		{"garbage", nil, "not json", CheckErrRemoteInvalidOutput},
+		{"unauthorized", errors.New("exit status 1: ERROR: unexpected status: 401 Unauthorized"), "", CheckErrRemoteAuth},
+		{"authRequired", errors.New("exit status 1: authentication required"), "", CheckErrRemoteAuth},
+		{"scope", errors.New("exit status 1: error: insufficient_scope: authorization failed"), "", CheckErrRemoteAuth},
+		{"digitsInDigest", errors.New("exit status 1: dial tcp 10.0.4013.1:443: connection refused sha256:a401b"), "", CheckErrRemoteUnavailable},
+		{"404", errors.New("exit status 1: unexpected status code 404"), "", CheckErrRemoteNotFound},
+		{"manifestUnknown", errors.New("exit status 1: MANIFEST_UNKNOWN: manifest unknown"), "", CheckErrRemoteNotFound},
+		{"localPermission", errors.New("exit status 1: permission denied while trying to connect to the docker API at unix:///var/run/docker.sock"), "", CheckErrRemoteUnavailable},
+		{"noDocker", fmt.Errorf("wrap: %w", &exec.Error{Name: "docker", Err: exec.ErrNotFound}), "", CheckErrRemoteUnavailable},
+		{"noDockerText", errors.New(`exec: "docker": executable file not found in $PATH`), "", CheckErrRemoteUnavailable},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -238,5 +248,39 @@ func TestCheck_NotRunningAndMissingImage(t *testing.T) {
 	res := f.runner().CheckServices(context.Background(), []string{"missing"})
 	if res[0].ErrorCode != CheckErrImageRefMissing || res[0].UpdateAvailable != nil {
 		t.Fatalf("result = %+v", res[0])
+	}
+}
+
+func TestCheck_DeadlineDuringLocalInspectIsTimeout(t *testing.T) {
+	ref := "ghcr.io/x/trader:latest"
+	f := &fakeCheck{
+		refs:      map[string]string{"trader": ref},
+		running:   map[string][]string{"trader": {"sha256:cfg1"}},
+		images:    map[string]map[string]any{},
+		remoteErr: map[string]error{ref: context.DeadlineExceeded},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), -1)
+	defer cancel()
+	res := f.runner().CheckServices(ctx, []string{"trader"})
+	if res[0].ErrorCode != CheckErrTimeout || res[0].UpdateAvailable != nil {
+		t.Fatalf("result = %+v", res[0])
+	}
+}
+
+func TestCheck_ImageRefsPassedAfterDoubleDash(t *testing.T) {
+	var got [][]string
+	r := &Runner{outputFn: func(ctx context.Context, args []string) ([]byte, error) {
+		got = append(got, args)
+		return nil, errors.New("x")
+	}}
+	_, _, _ = r.remoteImage(context.Background(), "-evil")
+	_, _ = r.localImageIDExec(context.Background(), "-evil")
+	for _, args := range got {
+		if len(args) < 2 || args[len(args)-2] != "--" || args[len(args)-1] != "-evil" {
+			t.Fatalf("ref must follow --: %v", args)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("calls = %v", got)
 	}
 }

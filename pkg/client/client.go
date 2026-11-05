@@ -103,13 +103,18 @@ func (c *Client) Health(ctx context.Context) (*HealthResult, error) {
 	return out, nil
 }
 
-// Update 调用 POST /update {services}，异步创建更新任务（服务端默认先 pull）。services 必填。
-func (c *Client) Update(ctx context.Context, services []string) (*CreateUpdateResult, error) {
-	body, err := json.Marshal(struct {
-		Services []string `json:"services"`
-	}{Services: services})
-	if err != nil {
-		return nil, err
+// Update 调用 POST /update，异步创建更新任务（服务端默认先 pull，只 up 需要更新的服务）。
+// 不传 services 时发送 {}，目标为服务端 compose 服务 ∩ ALLOWED_SERVICES（与旧版本行为兼容）。
+func (c *Client) Update(ctx context.Context, services ...string) (*CreateUpdateResult, error) {
+	body := []byte("{}")
+	if len(services) > 0 {
+		var err error
+		body, err = json.Marshal(struct {
+			Services []string `json:"services"`
+		}{Services: services})
+		if err != nil {
+			return nil, err
+		}
 	}
 	return c.createComposeJob(ctx, "/update", body)
 }

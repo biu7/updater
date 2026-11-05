@@ -280,6 +280,7 @@ func (r *Runner) run(ctx context.Context, args []string, logSink io.Writer) erro
 	}
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = r.cfg.ComposeProjectDir
+	cmd.WaitDelay = cmdWaitDelay
 	var stderr bytes.Buffer
 	cmd.Stdout = logSink
 	cmd.Stderr = io.MultiWriter(logSink, &stderr)

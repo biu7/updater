@@ -155,7 +155,11 @@ func TestServiceValidation_RejectsMissingOrDisallowedServices(t *testing.T) {
 	runner := &stubRunner{allowed: []string{"trader", "ib-gateway"}}
 	r := newTestRouter(runner)
 	for _, path := range []string{"/update", "/pull", "/check"} {
-		for _, body := range []string{``, `{}`, `{"services":[]}`, `{"services":["db"]}`, `{"services":["trader","db"]}`, `{"services":["-bad"]}`} {
+		bodies := []string{`{"services":["db"]}`, `{"services":["trader","db"]}`, `{"services":["-bad"]}`, `{"services":[""]}`}
+		if path == "/check" {
+			bodies = append(bodies, ``, `{}`, `{"services":[]}`)
+		}
+		for _, body := range bodies {
 			code, env := do(t, r, http.MethodPost, path, body)
 			if code != http.StatusBadRequest || env.Code != codeInvalidService {
 				t.Fatalf("%s %q: status=%d code=%d, want 400/%d", path, body, code, env.Code, codeInvalidService)
@@ -374,5 +378,37 @@ func TestNewRouterRegistersRoutes(t *testing.T) {
 	code, _ := do(t, r, http.MethodGet, "/jobs/latest?service=trader", "")
 	if code != http.StatusNotFound {
 		t.Fatalf("status = %d", code)
+	}
+}
+
+// 兼容旧客户端（如 pkg/client v0.0.3 发送 {}）：未传或传空 services 时目标为 compose 服务 ∩ ALLOWED_SERVICES。
+func TestUpdateAndPull_EmptyServicesMeansAllTargets(t *testing.T) {
+	runner := &stubRunner{allowed: []string{"ib-gateway", "trader"}}
+	r := newTestRouter(runner)
+	for _, tc := range []struct{ path, body, call string }{
+		{"/update", `{}`, "update ib-gateway,trader pull=true"},
+		{"/update", ``, "update ib-gateway,trader pull=true"},
+		{"/update", `{"services":[],"pull":false}`, "update ib-gateway,trader pull=false"},
+		{"/pull", `{}`, "pull ib-gateway,trader"},
+	} {
+		before := len(runner.recorded())
+		code, env := do(t, r, http.MethodPost, tc.path, tc.body)
+		if code != http.StatusOK {
+			t.Fatalf("%s %q: status = %d", tc.path, tc.body, code)
+		}
+		j := waitDone(t, r, createdJobID(t, env))
+		if !slices.Equal(j.Services, []string{"ib-gateway", "trader"}) {
+			t.Fatalf("services = %v", j.Services)
+		}
+		if calls := runner.recorded(); len(calls) != before+1 || calls[before] != tc.call {
+			t.Fatalf("calls = %v, want last %q", calls, tc.call)
+		}
+	}
+
+	r2 := newTestRouter(&stubRunner{})
+	for _, path := range []string{"/update", "/pull"} {
+		if code, env := do(t, r2, http.MethodPost, path, `{}`); code != http.StatusForbidden || env.Code != codeServiceForbidden {
+			t.Fatalf("%s no allowed services: status=%d code=%d", path, code, env.Code)
+		}
 	}
 }

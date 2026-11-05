@@ -53,7 +53,7 @@ type updateBody struct {
 
 // PostUpdate 异步触发指定服务的更新：可选 pull（默认 true），再只对 needs_up 服务执行 up -d --no-deps。
 func (h *Handlers) PostUpdate(c *gin.Context) {
-	body, services, ok := h.parseRequestedServices(c)
+	body, services, ok := h.parseRequestedServices(c, true)
 	if !ok {
 		return
 	}
@@ -66,7 +66,7 @@ func (h *Handlers) PostUpdate(c *gin.Context) {
 
 // PostPull 异步触发指定服务的 pull-only 任务，结果返回 needs_up / uncertain。
 func (h *Handlers) PostPull(c *gin.Context) {
-	_, services, ok := h.parseRequestedServices(c)
+	_, services, ok := h.parseRequestedServices(c, true)
 	if !ok {
 		return
 	}
@@ -79,7 +79,7 @@ func (h *Handlers) PostCheck(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), checkTimeout)
 	defer cancel()
 	c.Request = c.Request.WithContext(ctx)
-	_, services, ok := h.parseRequestedServices(c)
+	_, services, ok := h.parseRequestedServices(c, false)
 	if !ok {
 		return
 	}
@@ -93,16 +93,8 @@ func (h *Handlers) PostRestart(c *gin.Context) {
 		writeResponse(c, http.StatusBadRequest, codeInvalidJSON, "请求体格式不正确", err.Error(), nil)
 		return
 	}
-	services, err := h.runner.ResolveTargetServices(c.Request.Context())
-	if err != nil {
-		switch {
-		case errors.Is(err, updater.ErrNoAllowedServices):
-			writeResponse(c, http.StatusForbidden, codeServiceForbidden, "当前 compose 中没有允许执行的服务，未创建任务", "", nil)
-		case errors.Is(err, updater.ErrNoComposeServices):
-			writeResponse(c, http.StatusInternalServerError, codeCreateJobFailed, "当前 compose 中未解析到可执行服务，未创建任务", err.Error(), nil)
-		default:
-			writeResponse(c, http.StatusInternalServerError, codeCreateJobFailed, "创建重启任务失败，请稍后重试", err.Error(), nil)
-		}
+	services, ok := h.resolveAllTargets(c, "重启")
+	if !ok {
 		return
 	}
 	h.enqueue(c, services, jobs.ActionRestart, "重启", "重启任务已创建，正在后台执行",
@@ -112,12 +104,34 @@ func (h *Handlers) PostRestart(c *gin.Context) {
 		})
 }
 
+// resolveAllTargets 返回 compose 服务 ∩ ALLOWED_SERVICES 的全部服务（旧语义）；失败时已写出响应。
+func (h *Handlers) resolveAllTargets(c *gin.Context, actionName string) ([]string, bool) {
+	services, err := h.runner.ResolveTargetServices(c.Request.Context())
+	if err != nil {
+		switch {
+		case errors.Is(err, updater.ErrNoAllowedServices):
+			writeResponse(c, http.StatusForbidden, codeServiceForbidden, "当前 compose 中没有允许执行的服务，未创建任务", "", nil)
+		case errors.Is(err, updater.ErrNoComposeServices):
+			writeResponse(c, http.StatusInternalServerError, codeCreateJobFailed, "当前 compose 中未解析到可执行服务，未创建任务", err.Error(), nil)
+		default:
+			writeResponse(c, http.StatusInternalServerError, codeCreateJobFailed, fmt.Sprintf("创建%s任务失败，请稍后重试", actionName), err.Error(), nil)
+		}
+		return nil, false
+	}
+	return services, true
+}
+
 // parseRequestedServices 解析请求体并校验 services ⊆ compose 服务 ∩ ALLOWED_SERVICES；失败时已写出响应。
-func (h *Handlers) parseRequestedServices(c *gin.Context) (updateBody, []string, bool) {
+// allowAll 为 true 时，未传或传空 services 表示全部目标服务（兼容旧客户端发送的 {}）。
+func (h *Handlers) parseRequestedServices(c *gin.Context, allowAll bool) (updateBody, []string, bool) {
 	body, err := parseUpdateBody(c)
 	if err != nil {
 		writeResponse(c, http.StatusBadRequest, codeInvalidJSON, "请求体格式不正确", err.Error(), nil)
 		return body, nil, false
+	}
+	if allowAll && len(body.Services) == 0 {
+		services, ok := h.resolveAllTargets(c, "任务")
+		return body, services, ok
 	}
 	services, err := NormalizeServices(body.Services)
 	if err != nil {

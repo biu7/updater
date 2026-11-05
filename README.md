@@ -1,7 +1,7 @@
 # updater
 
-运行在 Docker Compose 中的内部服务：接收 HTTP 请求，对**指定服务**执行版本检查、拉取或更新。请求中的服务必须属于 compose 中的服务，且在配置了
-`ALLOWED_SERVICES` 时属于白名单，否则返回 400。更新只对“需要 up”的服务执行 `docker compose up -d --no-deps <服务…>`，不会连带重建依赖服务；
+运行在 Docker Compose 中的内部服务：接收 HTTP 请求，对指定服务执行版本检查、拉取或更新。请求中的服务必须属于 compose 中的服务，且在配置了
+`ALLOWED_SERVICES` 时属于白名单，否则返回 400；`/update`、`/pull` 未指定服务时作用于全部允许的服务（兼容旧客户端）。更新只对“需要 up”的服务执行 `docker compose up -d --no-deps <服务…>`，不会连带重建依赖服务；
 判定不确定的服务一律不重启。任务异步执行，可通过任务 ID 或服务名查询结果。
 
 服务本身不做认证：请只把它放在仅与调用方共享的内部网络中，不要发布端口（它持有 `docker.sock`，等同宿主 root）。
@@ -14,7 +14,7 @@
 | `COMPOSE_PROJECT_DIR` | compose 项目根目录（工作目录，`.env` 也从这里读取）；推荐与宿主路径相同，见下文“同路径挂载” | `/workspace/compose-project` |
 | `COMPOSE_PROJECT_DIRECTORY` | 可选，透传到 `docker compose --project-directory`；同路径挂载时不需要 | 无（不传该参数） |
 | `COMPOSE_FILE`        | 可选，compose 文件路径，多个用逗号分隔。该变量同时会被 docker compose 自身读取，一般不要设置，使用项目目录下的默认文件名 | 无（使用项目默认）                    |
-| `ALLOWED_SERVICES`    | 可选，允许操作的服务名白名单，逗号分隔               | 无（不限制）                       |
+| `ALLOWED_SERVICES`    | 允许操作的服务名白名单，逗号分隔。必须排除 updater 自身：updater 重建自己会中断进行中的任务 | 无（不限制，仅适合 compose 中没有 updater 自身的场景） |
 | `UPDATE_TIMEOUT`      | 单次 pull/update/restart 任务超时，Go duration 格式 | `10m`                        |
 
 ## HTTP 接口
@@ -24,14 +24,17 @@
 | 接口 | 说明 |
 | --- | --- |
 | `GET /health` | 健康检查 |
-| `POST /update` | `{"services":[…], "pull"?: bool}`，异步更新；`pull` 默认 `true` |
-| `POST /pull` | `{"services":[…]}`，异步拉取（pull-only），不重启任何容器 |
+| `POST /update` | `{"services"?:[…], "pull"?: bool}`，异步更新；`pull` 默认 `true` |
+| `POST /pull` | `{"services"?:[…]}`，异步拉取（pull-only），不重启任何容器 |
 | `POST /check` | `{"services":[…]}`，同步检查是否有可用更新；整体期限 60 秒，不占用任务锁 |
 | `POST /restart` | 重启 compose 服务 ∩ `ALLOWED_SERVICES` 的全部服务（忽略请求中的 `services`），执行 `docker compose restart` |
 | `GET /jobs/:id` | 按 ID 查询任务 |
 | `GET /jobs/latest?service=<svc>` | 返回包含该服务的最近一个任务；没有时 404（code `40401`） |
 
-`services` 必填、去重后保持顺序；为空、名称非法或不在“compose 服务 ∩ `ALLOWED_SERVICES`”中时返回 400（code `40002`），请求体不是合法 JSON 时返回 400（code `40001`）。
+`services` 去重后保持顺序；任一名称非法或不在“compose 服务 ∩ `ALLOWED_SERVICES`”中时返回 400（code `40002`），请求体不是合法 JSON 时返回 400（code `40001`）。
+
+兼容语义：`/update`、`/pull` 的请求体为空、`{}` 或 `services` 为空数组时，目标为 compose 服务 ∩ `ALLOWED_SERVICES` 的全部服务（与旧版本一致，例如 `pkg/client` v0.0.3 发送 `{}`），
+交集为空时返回 403（code `40301`）；仍按下述 `needs_up` 判据只对需要的服务执行 `up -d --no-deps`。`/check` 的 `services` 必填。
 同一时刻只允许一个进行中的 `update`／`pull`／`restart` 任务（`pending` 或 `running`），冲突返回 409（code `40901`，`data.existing_job_id` 等）。
 任务只保存在内存中，保留最近 20 条，进程重启后丢失。
 
@@ -115,7 +118,7 @@ pull 前后的本地镜像 ID 对比只写入日志，不参与判定，因此�
 ```
 
 - `update_available` 比较的是**运行中容器**所用镜像与远程 digest（`docker buildx imagetools inspect <image>` 的 index／manifest digest）：经典镜像存储看本地镜像的 `RepoDigests`，containerd image store 下本地镜像 ID 即 index digest，两者都支持。服务有多个容器时，任一容器不是远程 digest 即为 `true`。
-- 无法判定时 `update_available` 为 `null` 并给出 `error_code`，不表示“无更新”。稳定错误码：`compose_config_failed`、`image_ref_missing`、`not_running`（无运行容器）、`local_inspect_failed`、`remote_timeout`、`remote_auth_failed`、`remote_not_found`、`remote_unavailable`、`remote_invalid_response`。本地与远程都失败时优先报告本地错误码。
+- 无法判定时 `update_available` 为 `null` 并给出 `error_code`，不表示“无更新”。稳定错误码：`compose_config_failed`、`image_ref_missing`、`not_running`（无运行容器）、`local_inspect_failed`、`timeout`（60 秒整体期限耗尽导致本地读取失败）、`remote_timeout`、`remote_auth_failed`、`remote_not_found`、`remote_unavailable`（含网络错误及 updater 本地无法执行 docker/buildx 等）、`remote_invalid_response`。本地与远程都失败时优先报告本地错误码。
 - `current_version`／`remote_version`：镜像 env 中有 `IB_GATEWAY_VERSION` 时取它，否则取 OCI label `org.opencontainers.image.version`；取不到时为空字符串。只读取这两个白名单字段，不返回镜像 Env 或其他配置。多平台镜像的远程版本取与 updater 相同平台（如 `linux/amd64`）的配置。
 
 ### `POST /restart`
@@ -160,7 +163,7 @@ func example() error {
         return errors.New("健康检查未通过")
     }
 
-    created, err := c.Update(ctx, []string{"api"})
+    created, err := c.Update(ctx, "api") // 不传服务时作用于全部允许的服务
     if err != nil {
         return err
     }
@@ -240,7 +243,8 @@ compose 文件中的相对路径（bind 卷、`secrets` 文件、`env_file`）�
 updater 的 `pull` 与 `check` 使用 `/root/.docker/config.json` 中的凭据：
 
 - 在宿主以 root 执行 `docker login <registry>`（例如 GHCR 只读 PAT：`read:packages`，`--password-stdin`），确认 `/root/.docker/config.json` 中有 `auths["<registry>"].auth`，且**没有** `credsStore`／`credHelpers`（updater 容器内没有对应的凭据助手）。
-- 只把这个**单文件**只读挂入：`/root/.docker/config.json:/root/.docker/config.json:ro`。不要挂整个 `/root/.docker` 目录，buildx 需要在其中写入状态。
+- 只把这个**单文件**只读挂入（见示例：长语法 bind、`read_only: true`、`bind.create_host_path: false`，源路径由 `UPDATER_DOCKER_CONFIG` 覆盖，默认 `/root/.docker/config.json`）。不要挂整个 `/root/.docker` 目录，buildx 需要在其中写入状态。
+- 该文件必须事先存在，否则 `create_host_path: false` 会使 updater 启动失败（短语法则会在宿主自动创建一个同名目录）。只使用公开镜像时，可先执行 `docker login`，或创建内容为 `{}` 的文件：`install -d -m 700 /root/.docker && [ -e /root/.docker/config.json ] || printf '{}' > /root/.docker/config.json`。
 - 单文件 bind mount 绑定的是挂载时的 inode；`docker login` 会替换该文件，因此重新 login 后需执行 `docker compose up -d --force-recreate updater` 让新凭据生效。
 
 ## 说明

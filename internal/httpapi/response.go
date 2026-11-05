@@ -35,6 +35,9 @@ type jobData struct {
 	Status     jobs.Status `json:"status"`
 	Error      string      `json:"error,omitempty"`
 	LogTail    string      `json:"log_tail,omitempty"`
+	NeedsUp    []string    `json:"needs_up"`
+	Upped      []string    `json:"upped"`
+	Uncertain  []string    `json:"uncertain"`
 	CreatedAt  time.Time   `json:"created_at"`
 	StartedAt  *time.Time  `json:"started_at,omitempty"`
 	FinishedAt *time.Time  `json:"finished_at,omitempty"`
@@ -57,6 +60,9 @@ func buildJobResponse(j *jobs.Job) (httpStatus int, code int, message string, de
 		Status:     j.Status,
 		Error:      j.Error,
 		LogTail:    j.LogTail,
+		NeedsUp:    nonNil(j.NeedsUp),
+		Upped:      nonNil(j.Upped),
+		Uncertain:  nonNil(j.Uncertain),
 		CreatedAt:  j.CreatedAt,
 		StartedAt:  j.StartedAt,
 		FinishedAt: j.FinishedAt,
@@ -78,10 +84,19 @@ func buildJobResponse(j *jobs.Job) (httpStatus int, code int, message string, de
 	}
 }
 
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
 func pendingMessage(action jobs.Action) string {
 	switch action {
 	case jobs.ActionRestart:
 		return "重启任务已创建，等待开始执行"
+	case jobs.ActionPull:
+		return "拉取任务已创建，等待开始执行"
 	default:
 		return "更新任务已创建，等待开始执行"
 	}
@@ -91,12 +106,20 @@ func runningMessage(action jobs.Action) string {
 	switch action {
 	case jobs.ActionRestart:
 		return "重启任务正在执行中"
+	case jobs.ActionPull:
+		return "拉取任务正在执行中"
 	default:
 		return "更新任务正在执行中"
 	}
 }
 
 func friendlySuccessMessage(action jobs.Action, raw string) string {
+	if action == jobs.ActionPull {
+		if raw == "" {
+			return "拉取任务执行成功"
+		}
+		return raw
+	}
 	switch {
 	case raw == "":
 		if action == jobs.ActionRestart {
@@ -117,6 +140,12 @@ func friendlySuccessMessage(action jobs.Action, raw string) string {
 }
 
 func friendlyFailureMessage(action jobs.Action, raw string) string {
+	if action == jobs.ActionPull {
+		if strings.Contains(raw, "context deadline exceeded") {
+			return "拉取任务执行超时，已终止本次拉取"
+		}
+		return "拉取任务执行失败，请稍后重试"
+	}
 	switch {
 	case strings.Contains(raw, "context deadline exceeded"):
 		if action == jobs.ActionRestart {

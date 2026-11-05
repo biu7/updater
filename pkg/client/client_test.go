@@ -48,7 +48,7 @@ func TestUpdate_Created(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(body) != `{}` {
+		if string(body) != `{"services":["api","worker"]}` {
 			t.Fatalf("unexpected body: %s", string(body))
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -59,7 +59,7 @@ func TestUpdate_Created(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := client.NewWithBaseURL(srv.URL)
-	res, err := c.Update(context.Background())
+	res, err := c.Update(context.Background(), []string{"api", "worker"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestUpdate_Conflict(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := client.NewWithBaseURL(srv.URL)
-	res, err := c.Update(context.Background())
+	res, err := c.Update(context.Background(), []string{"api", "worker"})
 	if err != nil {
 		t.Fatal(err)
 	}

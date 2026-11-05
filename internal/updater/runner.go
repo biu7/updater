@@ -23,6 +23,8 @@ type Runner struct {
 	composeConfigRootFn      func(ctx context.Context) (map[string]any, error)
 	localImageIDFn           func(ctx context.Context, imageRef string) (string, error)
 	runningServiceImageIDsFn func(ctx context.Context, service string) ([]string, error)
+	// outputFn 替换 docker 子命令执行（测试用）；为 nil 时执行真实 docker。
+	outputFn func(ctx context.Context, args []string) ([]byte, error)
 }
 
 var (
@@ -74,128 +76,176 @@ func (r *Runner) ResolveTargetServices(ctx context.Context) ([]string, error) {
 	return targets, nil
 }
 
-// UpdateServices 先 pull，再仅在“本地最新镜像尚未被当前容器实际使用”时执行 up -d。
-// 这既覆盖新镜像刚被拉取的场景，也覆盖上次 up -d 失败导致容器仍停留在旧镜像的场景。
-func (r *Runner) UpdateServices(ctx context.Context, services []string) (message string, log string, err error) {
-	var buf cappedBuffer
-	w := io.MultiWriter(&buf)
-
-	if len(services) == 0 {
-		services, err = r.ResolveTargetServices(ctx)
-		if err != nil {
-			return "", "", err
-		}
-	}
-	fmt.Fprintf(w, "[updater] 本次更新目标服务: %s\n", strings.Join(services, ","))
-
-	type imageState struct {
-		service  string
-		imageRef string
-		idBefore string
-	}
-
-	imageStates := make([]imageState, 0, len(services))
-	missingImageServices := make([]string, 0)
-	if root, cfgErr := r.composeConfigRoot(ctx); cfgErr != nil {
-		fmt.Fprintf(w, "[updater] 警告: 无法读取 compose config（无法确认镜像引用，将采用保守策略避免误重启）: %v\n", cfgErr)
-	} else {
-		for _, service := range services {
-			ref, ok := imageRefFromComposeConfig(root, service)
-			if !ok {
-				missingImageServices = append(missingImageServices, service)
-				fmt.Fprintf(w, "[updater] 提示: 服务 %q 无可用 image 字符串（例如仅 build），将仅在 pull 输出可明确判定时重启\n", service)
-				continue
-			}
-			fmt.Fprintf(w, "[updater] 服务 %q 从 compose 解析到镜像引用: %s\n", service, ref)
-			imageStates = append(imageStates, imageState{
-				service:  service,
-				imageRef: ref,
-			})
-		}
-	}
-
-	for i := range imageStates {
-		if id, err := r.localImageID(ctx, imageStates[i].imageRef); err == nil && id != "" {
-			imageStates[i].idBefore = id
-			fmt.Fprintf(w, "[updater] 服务 %q pull 前本地镜像 ID: %s\n", imageStates[i].service, id)
-		} else {
-			fmt.Fprintf(w, "[updater] 服务 %q pull 前本地尚无该镜像或无法读取 ID（将视为可能更新）\n", imageStates[i].service)
-		}
-	}
-
-	pullArgs := append(r.composeBaseArgs(), "pull")
-	pullArgs = append(pullArgs, services...)
-	if e := r.run(ctx, pullArgs, w); e != nil {
-		return "", buf.String(), fmt.Errorf("docker compose pull: %w", e)
-	}
-
-	servicesNeedingUp := make([]string, 0)
-	uncertainServices := make([]string, 0)
-	for _, state := range imageStates {
-		idAfter, errAfter := r.localImageID(ctx, state.imageRef)
-		if errAfter != nil || idAfter == "" {
-			fmt.Fprintf(w, "[updater] 警告: 服务 %q pull 后仍无法读取镜像 ID，无法确认是否更新: %v\n", state.service, errAfter)
-			uncertainServices = append(uncertainServices, state.service)
-			continue
-		}
-		fmt.Fprintf(w, "[updater] 服务 %q pull 后本地镜像 ID: %s\n", state.service, idAfter)
-
-		runningImageIDs, errRunning := r.runningServiceImageIDs(ctx, state.service)
-		if errRunning != nil {
-			fmt.Fprintf(w, "[updater] 警告: 服务 %q 无法读取当前容器镜像 ID，无法确认是否需要执行 up -d: %v\n", state.service, errRunning)
-			uncertainServices = append(uncertainServices, state.service)
-			continue
-		}
-		if len(runningImageIDs) == 0 {
-			fmt.Fprintf(w, "[updater] 服务 %q 当前没有已创建的 compose 容器，需要执行 up -d 以应用本地镜像\n", state.service)
-			servicesNeedingUp = append(servicesNeedingUp, state.service)
-			continue
-		}
-		fmt.Fprintf(w, "[updater] 服务 %q 当前容器镜像 ID: %s\n", state.service, strings.Join(runningImageIDs, ","))
-		if len(runningImageIDs) != 1 || runningImageIDs[0] != idAfter {
-			fmt.Fprintf(w, "[updater] 服务 %q 当前容器尚未全部使用本地最新镜像，需要执行 up -d\n", state.service)
-			servicesNeedingUp = append(servicesNeedingUp, state.service)
-			continue
-		}
-		if state.idBefore == "" || state.idBefore != idAfter {
-			fmt.Fprintf(w, "[updater] 服务 %q pull 后镜像已更新，且运行容器已使用该镜像\n", state.service)
-		} else {
-			fmt.Fprintf(w, "[updater] 服务 %q 本地镜像与运行容器镜像一致，无需执行 up -d\n", state.service)
-		}
-	}
-
-	combined := buf.String()
-
-	if len(servicesNeedingUp) == 0 {
-		if len(imageStates) == 0 {
-			if PullIndicatesNoNewImage(combined) {
-				return "本次 pull 未发现可更新镜像（输出判定），已跳过重启", combined, nil
-			}
-			return "无法确认本次 pull 是否已拉取到新镜像，已跳过重启", combined, nil
-		}
-		if len(uncertainServices) > 0 || len(missingImageServices) > 0 {
-			return "无法确认部分服务 pull 后镜像是否已更新，已跳过重启", combined, nil
-		}
-		return "所有服务 pull 后镜像 ID 均未变化，已跳过重启", combined, nil
-	}
-
-	buf2 := cappedBuffer{maxBytes: buf.maxBytes}
-	// 将 pull 日志保留，并追加 up 输出
-	_, _ = buf2.Write([]byte(combined))
-	w2 := io.MultiWriter(&buf2)
-
-	upArgs := append(r.composeBaseArgs(), "up", "-d")
-	upArgs = append(upArgs, services...)
-	if e := r.run(ctx, upArgs, w2); e != nil {
-		return "", buf2.String(), fmt.Errorf("docker compose up -d: %w", e)
-	}
-	slices.Sort(servicesNeedingUp)
-	return fmt.Sprintf("更新已完成（已执行 pull 与 up -d，需要应用镜像的服务：%s）", strings.Join(servicesNeedingUp, ",")), buf2.String(), nil
+// Result 是 pull/update 任务的结构化结果。
+// NeedsUp：判定需要 up 的服务（无运行容器，或任一容器镜像 ≠ 本地 tag 当前镜像 ID）；
+// Upped：本次实际执行 up -d --no-deps 的服务；Uncertain：无法判定、因而未 up 的服务。
+type Result struct {
+	Message   string
+	Log       string
+	NeedsUp   []string
+	Upped     []string
+	Uncertain []string
 }
 
-// UpdateService 兼容单服务调用。
-func (r *Runner) UpdateService(ctx context.Context, service string) (message string, log string, err error) {
-	return r.UpdateServices(ctx, []string{service})
+// ErrInvalidServices 表示请求的服务不在 compose 服务与 ALLOWED_SERVICES 的交集中。
+var ErrInvalidServices = errors.New("请求的服务不在允许范围内")
+
+// ValidateServices 校验 requested ⊆ compose 服务 ∩ ALLOWED_SERVICES；不满足时返回包装了 ErrInvalidServices 的错误。
+func (r *Runner) ValidateServices(ctx context.Context, requested []string) error {
+	targets, err := r.ResolveTargetServices(ctx)
+	if err != nil && !errors.Is(err, ErrNoAllowedServices) && !errors.Is(err, ErrNoComposeServices) {
+		return err
+	}
+	var invalid []string
+	for _, s := range requested {
+		if !slices.Contains(targets, s) {
+			invalid = append(invalid, s)
+		}
+	}
+	if len(invalid) > 0 {
+		return fmt.Errorf("%w: %s", ErrInvalidServices, strings.Join(invalid, ","))
+	}
+	return nil
+}
+
+// PullServices 仅对指定服务执行 compose pull，并返回 needs_up / uncertain 判定，不执行 up。
+func (r *Runner) PullServices(ctx context.Context, services []string) (Result, error) {
+	var buf cappedBuffer
+	fmt.Fprintf(&buf, "[updater] 本次拉取目标服务: %s\n", strings.Join(services, ","))
+	res, err := r.pullAndEvaluate(ctx, services, true, &buf)
+	res.Log = buf.String()
+	if err != nil {
+		return res, err
+	}
+	switch {
+	case len(res.NeedsUp) == 0 && len(res.Uncertain) == 0:
+		res.Message = "拉取已完成，所有服务运行容器已使用本地最新镜像"
+	default:
+		res.Message = fmt.Sprintf("拉取已完成（需要应用镜像的服务：%s；判定不确定的服务：%s）",
+			joinOrNone(res.NeedsUp), joinOrNone(res.Uncertain))
+	}
+	return res, nil
+}
+
+// UpdateServices 按需 pull（pull=true）后，只对 needs_up 服务执行 compose up -d --no-deps。
+// 判据不确定的服务进入 Uncertain，不执行 up。
+func (r *Runner) UpdateServices(ctx context.Context, services []string, pull bool) (Result, error) {
+	var buf cappedBuffer
+	fmt.Fprintf(&buf, "[updater] 本次更新目标服务: %s（pull=%t）\n", strings.Join(services, ","), pull)
+	res, err := r.pullAndEvaluate(ctx, services, pull, &buf)
+	if err != nil {
+		res.Log = buf.String()
+		return res, err
+	}
+	if len(res.NeedsUp) == 0 {
+		res.Log = buf.String()
+		if len(res.Uncertain) > 0 {
+			res.Message = fmt.Sprintf("无法确认部分服务是否需要更新，已跳过重启（不确定：%s）", strings.Join(res.Uncertain, ","))
+		} else {
+			res.Message = "所有服务运行容器已使用本地最新镜像（镜像未变化），已跳过重启"
+		}
+		return res, nil
+	}
+
+	upArgs := append(r.composeBaseArgs(), "up", "-d", "--no-deps")
+	upArgs = append(upArgs, res.NeedsUp...)
+	if e := r.run(ctx, upArgs, &buf); e != nil {
+		res.Log = buf.String()
+		return res, fmt.Errorf("docker compose up -d: %w", e)
+	}
+	res.Upped = append([]string(nil), res.NeedsUp...)
+	res.Log = buf.String()
+	res.Message = fmt.Sprintf("更新已完成（已执行 up -d --no-deps 的服务：%s）", strings.Join(res.Upped, ","))
+	if len(res.Uncertain) > 0 {
+		res.Message += fmt.Sprintf("；无法确认的服务未重启：%s", strings.Join(res.Uncertain, ","))
+	}
+	return res, nil
+}
+
+// pullAndEvaluate 可选执行 pull，然后按 needs_up 判据逐服务判定。
+// pull 前后的本地镜像 ID 对比只写日志，不参与判定。
+func (r *Runner) pullAndEvaluate(ctx context.Context, services []string, pull bool, w io.Writer) (Result, error) {
+	res := Result{NeedsUp: []string{}, Upped: []string{}, Uncertain: []string{}}
+
+	refs := make(map[string]string, len(services))
+	if root, cfgErr := r.composeConfigRoot(ctx); cfgErr != nil {
+		fmt.Fprintf(w, "[updater] 警告: 无法读取 compose config，所有服务视为判定不确定: %v\n", cfgErr)
+	} else {
+		for _, service := range services {
+			if ref, ok := imageRefFromComposeConfig(root, service); ok {
+				refs[service] = ref
+				fmt.Fprintf(w, "[updater] 服务 %q 从 compose 解析到镜像引用: %s\n", service, ref)
+			} else {
+				fmt.Fprintf(w, "[updater] 服务 %q 无可用 image 字符串（例如仅 build），判定不确定\n", service)
+			}
+		}
+	}
+
+	before := make(map[string]string, len(refs))
+	if pull {
+		for service, ref := range refs {
+			if id, err := r.localImageID(ctx, ref); err == nil && id != "" {
+				before[service] = id
+			}
+		}
+		pullArgs := append(r.composeBaseArgs(), "pull")
+		pullArgs = append(pullArgs, services...)
+		if e := r.run(ctx, pullArgs, w); e != nil {
+			return res, fmt.Errorf("docker compose pull: %w", e)
+		}
+	}
+
+	for _, service := range services {
+		ref, ok := refs[service]
+		if !ok {
+			res.Uncertain = append(res.Uncertain, service)
+			continue
+		}
+		localID, err := r.localImageID(ctx, ref)
+		if err != nil || localID == "" {
+			fmt.Fprintf(w, "[updater] 警告: 服务 %q 无法读取本地镜像 %s 的 ID，判定不确定: %v\n", service, ref, err)
+			res.Uncertain = append(res.Uncertain, service)
+			continue
+		}
+		if pull {
+			switch prev := before[service]; {
+			case prev == "":
+				fmt.Fprintf(w, "[updater] 服务 %q pull 后本地镜像 ID: %s（pull 前无法读取）\n", service, localID)
+			case prev != localID:
+				fmt.Fprintf(w, "[updater] 服务 %q pull 后本地镜像 ID 变化: %s -> %s\n", service, prev, localID)
+			default:
+				fmt.Fprintf(w, "[updater] 服务 %q pull 后本地镜像 ID 未变: %s\n", service, localID)
+			}
+		} else {
+			fmt.Fprintf(w, "[updater] 服务 %q 本地镜像 ID: %s\n", service, localID)
+		}
+
+		runningIDs, err := r.runningServiceImageIDs(ctx, service)
+		if err != nil {
+			fmt.Fprintf(w, "[updater] 警告: 服务 %q 无法读取运行容器镜像 ID，判定不确定: %v\n", service, err)
+			res.Uncertain = append(res.Uncertain, service)
+			continue
+		}
+		if len(runningIDs) == 0 {
+			fmt.Fprintf(w, "[updater] 服务 %q 当前没有运行中的容器，需要 up\n", service)
+			res.NeedsUp = append(res.NeedsUp, service)
+			continue
+		}
+		if slices.ContainsFunc(runningIDs, func(id string) bool { return id != localID }) {
+			fmt.Fprintf(w, "[updater] 服务 %q 运行容器镜像 %s 与本地最新镜像不一致，需要 up\n", service, strings.Join(runningIDs, ","))
+			res.NeedsUp = append(res.NeedsUp, service)
+			continue
+		}
+		fmt.Fprintf(w, "[updater] 服务 %q 运行容器已使用本地最新镜像，无需 up\n", service)
+	}
+	return res, nil
+}
+
+func joinOrNone(s []string) string {
+	if len(s) == 0 {
+		return "无"
+	}
+	return strings.Join(s, ",")
 }
 
 // RestartServices 直接执行 docker compose restart；services 为空时会自动解析目标服务列表。

@@ -3,6 +3,7 @@ package jobs
 
 import (
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -14,12 +15,26 @@ var (
 	ErrConflict = errors.New("已有进行中的任务")
 )
 
-// Store 内存任务仓库，约束同一时刻仅允许一个活动任务。
+// MaxHistory 为内存中保留的任务条数上限（含进行中任务）。
+const MaxHistory = 20
+
+// Store 内存任务仓库，约束同一时刻仅允许一个活动任务，只保留最近 MaxHistory 条。
 type Store struct {
 	mu sync.Mutex
 
 	jobs        map[string]*Job
-	activeJobID string // 当前 pending 或 running 的任务
+	order       []string // 按创建先后排列的任务 ID
+	activeJobID string   // 当前 pending 或 running 的任务
+}
+
+// Outcome 是任务结束时写入的结果。
+type Outcome struct {
+	Message   string
+	Error     string
+	LogTail   string
+	NeedsUp   []string
+	Upped     []string
+	Uncertain []string
 }
 
 // NewStore 创建空仓库。
@@ -51,8 +66,13 @@ func (s *Store) TryEnqueueBatch(services []string, action Action) (*Job, *Job, e
 		CreatedAt: now,
 	}
 	s.jobs[id] = j
+	s.order = append(s.order, id)
 	s.activeJobID = id
-	return j, nil, nil
+	for len(s.order) > MaxHistory {
+		delete(s.jobs, s.order[0])
+		s.order = s.order[1:]
+	}
+	return cloneJob(j), nil, nil
 }
 
 // Get 按 ID 查询任务（不存在返回 nil）。
@@ -64,6 +84,19 @@ func (s *Store) Get(id string) *Job {
 		return nil
 	}
 	return cloneJob(j)
+}
+
+// Latest 返回包含指定服务的最近一个任务（不存在返回 nil）。
+func (s *Store) Latest(service string) *Job {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.order) - 1; i >= 0; i-- {
+		j := s.jobs[s.order[i]]
+		if j != nil && slices.Contains(j.Services, service) {
+			return cloneJob(j)
+		}
+	}
+	return nil
 }
 
 // MarkRunning 将任务标为运行中。
@@ -80,22 +113,8 @@ func (s *Store) MarkRunning(id string) bool {
 	return true
 }
 
-// FinishSucceeded 标记成功并释放活动任务占用。
-func (s *Store) FinishSucceeded(id, message, logTail string) {
-	s.finish(id, StatusSucceeded, message, "", logTail)
-}
-
-// FinishSkipped 标记任务已跳过并释放活动任务占用。
-func (s *Store) FinishSkipped(id, message, logTail string) {
-	s.finish(id, StatusSkipped, message, "", logTail)
-}
-
-// FinishFailed 标记失败并释放活动任务占用。
-func (s *Store) FinishFailed(id, errMsg, logTail string) {
-	s.finish(id, StatusFailed, "", errMsg, logTail)
-}
-
-func (s *Store) finish(id string, status Status, message, errMsg, logTail string) {
+// Finish 以给定状态结束任务并释放活动任务占用。
+func (s *Store) Finish(id string, status Status, o Outcome) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j := s.jobs[id]
@@ -104,18 +123,39 @@ func (s *Store) finish(id string, status Status, message, errMsg, logTail string
 	}
 	now := time.Now().UTC()
 	j.Status = status
-	j.Message = message
-	j.Error = errMsg
-	j.LogTail = logTail
+	j.Message = o.Message
+	j.Error = o.Error
+	j.LogTail = o.LogTail
+	j.NeedsUp = slices.Clone(o.NeedsUp)
+	j.Upped = slices.Clone(o.Upped)
+	j.Uncertain = slices.Clone(o.Uncertain)
 	j.FinishedAt = &now
 	if s.activeJobID == id {
 		s.activeJobID = ""
 	}
 }
 
+// FinishSucceeded 标记成功并释放活动任务占用。
+func (s *Store) FinishSucceeded(id, message, logTail string) {
+	s.Finish(id, StatusSucceeded, Outcome{Message: message, LogTail: logTail})
+}
+
+// FinishSkipped 标记任务已跳过并释放活动任务占用。
+func (s *Store) FinishSkipped(id, message, logTail string) {
+	s.Finish(id, StatusSkipped, Outcome{Message: message, LogTail: logTail})
+}
+
+// FinishFailed 标记失败并释放活动任务占用。
+func (s *Store) FinishFailed(id, errMsg, logTail string) {
+	s.Finish(id, StatusFailed, Outcome{Error: errMsg, LogTail: logTail})
+}
+
 func cloneJob(j *Job) *Job {
 	cp := *j
 	cp.Services = append([]string(nil), j.Services...)
+	cp.NeedsUp = append([]string{}, j.NeedsUp...)
+	cp.Upped = append([]string{}, j.Upped...)
+	cp.Uncertain = append([]string{}, j.Uncertain...)
 	if j.StartedAt != nil {
 		t := *j.StartedAt
 		cp.StartedAt = &t

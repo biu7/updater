@@ -1,30 +1,35 @@
 # 示例：将 updater 与业务栈放在同一 Compose 项目中时使用。
-# 请根据实际路径修改卷挂载与 COMPOSE_PROJECT_DIR。
+# 在宿主部署目录的 .env 中设置 DEPLOY_DIR=<该目录的绝对路径>（不含空白）。
+# 被管理的 compose 文件不得引用 updater 自身的环境变量名（PORT、COMPOSE_PROJECT_DIR 等，见 README）。
 
 services:
   updater:
-    build:
-      context: . # 本仓库根目录（含 Dockerfile）
-    # 默认仅在 Compose 内部网络暴露服务；如需本机调试，再显式添加 ports 映射。
+    image: ghcr.io/biu7/updater:latest
+    # 不发布端口：只供同一内部网络中的调用方访问（服务无认证且持有 docker.sock）。
     expose:
       - "8080"
     environment:
       PORT: "8080"
-      # 容器内能看到的主 compose 项目目录（需与下方卷挂载一致）
-      COMPOSE_PROJECT_DIR: /workspace/stack
-      # 可选：宿主机真实项目目录，等价于 docker compose --project-directory
-      # COMPOSE_PROJECT_DIRECTORY: /path/on/host/to/your/compose-project
-      # 若使用非默认文件名，可指定，多个文件用逗号分隔
-      # COMPOSE_FILE: docker-compose.yml,override.yml
-      # 可选：仅允许更新的服务名，逗号分隔
-      # ALLOWED_SERVICES: web,api
-      UPDATE_TIMEOUT: 10m
+      # 同路径挂载：容器内项目目录与宿主路径一致，compose 相对路径（卷、secrets、env_file）才能解析为正确的宿主路径。
+      COMPOSE_PROJECT_DIR: ${DEPLOY_DIR:?}
+      # 可选：仅允许操作的服务名，逗号分隔
+      ALLOWED_SERVICES: web,api
+      # 不要设置 COMPOSE_FILE / COMPOSE_PROJECT_NAME。
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /path/on/host/to/your/compose-project:/workspace/stack:ro
+      - ${DEPLOY_DIR:?}:${DEPLOY_DIR}:ro
+      # 私有 registry：宿主 root 的 docker config 单文件只读挂入（不能使用 credsStore/credHelpers）。
+      # 重新 docker login 后需 docker compose up -d --force-recreate updater。
+      - ${DOCKER_CONFIG_FILE:-/root/.docker/config.json}:/root/.docker/config.json:ro
     networks:
-      - internal
+      - updater
+    restart: unless-stopped
+
+  # 调用方示例：与 updater 共享 updater 网络。
+  # web:
+  #   image: ghcr.io/owner/web:latest
+  #   networks: [updater]
 
 networks:
-  internal:
+  updater:
     driver: bridge

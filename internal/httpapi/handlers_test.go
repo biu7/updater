@@ -3,9 +3,12 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,165 +20,359 @@ import (
 )
 
 type stubRunner struct {
-	resolveFn func(ctx context.Context) ([]string, error)
-	updateFn  func(ctx context.Context, services []string) (string, string, error)
+	mu        sync.Mutex
+	allowed   []string // compose 服务 ∩ ALLOWED_SERVICES
+	updateFn  func(ctx context.Context, services []string, pull bool) (updater.Result, error)
+	pullFn    func(ctx context.Context, services []string) (updater.Result, error)
 	restartFn func(ctx context.Context, services []string) (string, string, error)
+	checkFn   func(ctx context.Context, services []string) []updater.CheckResult
+	calls     []string
+}
+
+func (s *stubRunner) record(call string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, call)
+}
+
+func (s *stubRunner) recorded() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.calls)
 }
 
 func (s *stubRunner) ResolveTargetServices(ctx context.Context) ([]string, error) {
-	if s.resolveFn != nil {
-		return s.resolveFn(ctx)
+	if len(s.allowed) == 0 {
+		return nil, updater.ErrNoAllowedServices
 	}
-	return nil, nil
+	return s.allowed, nil
 }
 
-func (s *stubRunner) UpdateServices(ctx context.Context, services []string) (string, string, error) {
-	if s.updateFn != nil {
-		return s.updateFn(ctx, services)
+func (s *stubRunner) ValidateServices(ctx context.Context, services []string) error {
+	for _, svc := range services {
+		if !slices.Contains(s.allowed, svc) {
+			return fmt.Errorf("%w: %s", updater.ErrInvalidServices, svc)
+		}
 	}
-	return "更新已完成", "", nil
+	return nil
+}
+
+func (s *stubRunner) UpdateServices(ctx context.Context, services []string, pull bool) (updater.Result, error) {
+	s.record(fmt.Sprintf("update %s pull=%t", strings.Join(services, ","), pull))
+	if s.updateFn != nil {
+		return s.updateFn(ctx, services, pull)
+	}
+	return updater.Result{Message: "更新已完成", NeedsUp: services, Upped: services, Uncertain: []string{}}, nil
+}
+
+func (s *stubRunner) PullServices(ctx context.Context, services []string) (updater.Result, error) {
+	s.record("pull " + strings.Join(services, ","))
+	if s.pullFn != nil {
+		return s.pullFn(ctx, services)
+	}
+	return updater.Result{Message: "拉取已完成", NeedsUp: services, Upped: []string{}, Uncertain: []string{}}, nil
 }
 
 func (s *stubRunner) RestartServices(ctx context.Context, services []string) (string, string, error) {
+	s.record("restart " + strings.Join(services, ","))
 	if s.restartFn != nil {
 		return s.restartFn(ctx, services)
 	}
-	return "重启已完成", "", nil
+	return "重启已完成（已执行 restart）", "", nil
 }
 
-func TestPostUpdate_AcceptsEmptyBody(t *testing.T) {
-	gin.SetMode(gin.ReleaseMode)
-	store := jobs.NewStore()
-	runner := &stubRunner{
-		resolveFn: func(ctx context.Context) ([]string, error) {
-			return []string{"api", "worker"}, nil
-		},
+func (s *stubRunner) CheckServices(ctx context.Context, services []string) []updater.CheckResult {
+	s.record("check " + strings.Join(services, ","))
+	if s.checkFn != nil {
+		return s.checkFn(ctx, services)
 	}
-
-	r := gin.New()
-	h := NewHandlers(config.Config{UpdateTimeout: time.Second}, store, runner)
-	r.POST("/update", h.PostUpdate)
-
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(""))
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
-	}
-	var resp struct {
-		Code int `json:"code"`
-		Data struct {
-			JobID    string   `json:"job_id"`
-			Services []string `json:"services"`
-			Action   string   `json:"action"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal response: %v", err)
-	}
-	if resp.Code != successCode {
-		t.Fatalf("code = %d, want %d", resp.Code, successCode)
-	}
-	if resp.Data.JobID == "" {
-		t.Fatal("job_id 不应为空")
-	}
-	if resp.Data.Action != string(jobs.ActionUpdate) {
-		t.Fatalf("action = %q", resp.Data.Action)
-	}
-	if len(resp.Data.Services) != 2 || resp.Data.Services[0] != "api" || resp.Data.Services[1] != "worker" {
-		t.Fatalf("services = %#v", resp.Data.Services)
-	}
+	return nil
 }
 
-func TestPostUpdate_ForbiddenWhenNoAllowedServices(t *testing.T) {
+type envelope struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Detail  string          `json:"detail"`
+	Data    json.RawMessage `json:"data"`
+}
+
+func newTestRouter(runner *stubRunner) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
-	store := jobs.NewStore()
-	runner := &stubRunner{
-		resolveFn: func(ctx context.Context) ([]string, error) {
-			return nil, updater.ErrNoAllowedServices
-		},
-	}
-
+	h := NewHandlers(config.Config{UpdateTimeout: 5 * time.Second}, jobs.NewStore(), runner)
 	r := gin.New()
-	h := NewHandlers(config.Config{UpdateTimeout: time.Second}, store, runner)
 	r.POST("/update", h.PostUpdate)
+	r.POST("/pull", h.PostPull)
+	r.POST("/check", h.PostCheck)
+	r.POST("/restart", h.PostRestart)
+	r.GET("/jobs/latest", h.GetLatestJob)
+	r.GET("/jobs/:id", h.GetJob)
+	return r
+}
 
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{}`))
+func do(t *testing.T, r http.Handler, method, path, body string) (int, envelope) {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
+	var env envelope
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal %s: %v", w.Body.String(), err)
+	}
+	return w.Code, env
+}
 
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusForbidden)
+func waitDone(t *testing.T, r http.Handler, jobID string) jobData {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_, env := do(t, r, http.MethodGet, "/jobs/"+jobID, "")
+		var j jobData
+		if err := json.Unmarshal(env.Data, &j); err != nil {
+			t.Fatal(err)
+		}
+		if j.Status != jobs.StatusPending && j.Status != jobs.StatusRunning {
+			return j
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("job did not finish")
+	return jobData{}
+}
+
+func createdJobID(t *testing.T, env envelope) string {
+	t.Helper()
+	var d struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.Unmarshal(env.Data, &d); err != nil || d.JobID == "" {
+		t.Fatalf("no job id: %s", env.Data)
+	}
+	return d.JobID
+}
+
+func TestServiceValidation_RejectsMissingOrDisallowedServices(t *testing.T) {
+	runner := &stubRunner{allowed: []string{"trader", "ib-gateway"}}
+	r := newTestRouter(runner)
+	for _, path := range []string{"/update", "/pull", "/check"} {
+		for _, body := range []string{``, `{}`, `{"services":[]}`, `{"services":["db"]}`, `{"services":["trader","db"]}`, `{"services":["-bad"]}`} {
+			code, env := do(t, r, http.MethodPost, path, body)
+			if code != http.StatusBadRequest || env.Code != codeInvalidService {
+				t.Fatalf("%s %q: status=%d code=%d, want 400/%d", path, body, code, env.Code, codeInvalidService)
+			}
+		}
+		code, env := do(t, r, http.MethodPost, path, `{"services":`)
+		if code != http.StatusBadRequest || env.Code != codeInvalidJSON {
+			t.Fatalf("%s bad json: status=%d code=%d", path, code, env.Code)
+		}
+	}
+	if calls := runner.recorded(); len(calls) != 0 {
+		t.Fatalf("runner should not be called: %v", calls)
 	}
 }
 
-func TestPostRestart_ConflictUsesResolvedServices(t *testing.T) {
-	gin.SetMode(gin.ReleaseMode)
-	store := jobs.NewStore()
-	block := make(chan struct{})
-	started := make(chan struct{}, 1)
+func TestPostUpdate_DefaultPullTrueAndStructuredResult(t *testing.T) {
+	runner := &stubRunner{allowed: []string{"trader", "ib-gateway"}}
+	r := newTestRouter(runner)
+	code, env := do(t, r, http.MethodPost, "/update", `{"services":["ib-gateway"," ib-gateway "]}`)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", code, env.Data)
+	}
+	j := waitDone(t, r, createdJobID(t, env))
+	if j.Status != jobs.StatusSucceeded || !slices.Equal(j.Services, []string{"ib-gateway"}) ||
+		!slices.Equal(j.Upped, []string{"ib-gateway"}) || !slices.Equal(j.NeedsUp, []string{"ib-gateway"}) || j.Uncertain == nil {
+		t.Fatalf("job = %+v", j)
+	}
+	if calls := runner.recorded(); !slices.Equal(calls, []string{"update ib-gateway pull=true"}) {
+		t.Fatalf("calls = %v", calls)
+	}
+}
+
+func TestPostUpdate_PullFalseAndSkippedWhenNothingUpped(t *testing.T) {
 	runner := &stubRunner{
-		resolveFn: func(ctx context.Context) ([]string, error) {
-			return []string{"api", "worker"}, nil
+		allowed: []string{"trader"},
+		updateFn: func(ctx context.Context, services []string, pull bool) (updater.Result, error) {
+			return updater.Result{Message: "无法确认部分服务是否需要更新，已跳过重启", NeedsUp: []string{}, Upped: []string{}, Uncertain: []string{"trader"}}, nil
 		},
-		restartFn: func(ctx context.Context, services []string) (string, string, error) {
-			started <- struct{}{}
+	}
+	r := newTestRouter(runner)
+	_, env := do(t, r, http.MethodPost, "/update", `{"services":["trader"],"pull":false}`)
+	j := waitDone(t, r, createdJobID(t, env))
+	if j.Status != jobs.StatusSkipped || !slices.Equal(j.Uncertain, []string{"trader"}) || len(j.Upped) != 0 {
+		t.Fatalf("job = %+v", j)
+	}
+	if calls := runner.recorded(); !slices.Equal(calls, []string{"update trader pull=false"}) {
+		t.Fatalf("calls = %v", calls)
+	}
+	raw, _ := json.Marshal(j)
+	if !strings.Contains(string(raw), `"upped":[]`) {
+		t.Fatalf("upped should serialize as []: %s", raw)
+	}
+}
+
+func TestPostUpdate_FailedJobKeepsStructuredFields(t *testing.T) {
+	runner := &stubRunner{
+		allowed: []string{"trader"},
+		updateFn: func(ctx context.Context, services []string, pull bool) (updater.Result, error) {
+			return updater.Result{NeedsUp: []string{"trader"}}, fmt.Errorf("docker compose up -d: boom")
+		},
+	}
+	r := newTestRouter(runner)
+	_, env := do(t, r, http.MethodPost, "/update", `{"services":["trader"]}`)
+	j := waitDone(t, r, createdJobID(t, env))
+	if j.Status != jobs.StatusFailed || !slices.Equal(j.NeedsUp, []string{"trader"}) || j.Upped == nil || len(j.Upped) != 0 {
+		t.Fatalf("job = %+v", j)
+	}
+}
+
+func TestPostPull_PullOnlyJob(t *testing.T) {
+	runner := &stubRunner{
+		allowed: []string{"trader", "ib-gateway"},
+		pullFn: func(ctx context.Context, services []string) (updater.Result, error) {
+			return updater.Result{Message: "拉取已完成", NeedsUp: []string{}, Uncertain: []string{"trader"}}, nil
+		},
+	}
+	r := newTestRouter(runner)
+	_, env := do(t, r, http.MethodPost, "/pull", `{"services":["trader"]}`)
+	j := waitDone(t, r, createdJobID(t, env))
+	if j.Action != jobs.ActionPull || j.Status != jobs.StatusSucceeded || !slices.Equal(j.Uncertain, []string{"trader"}) || len(j.NeedsUp) != 0 {
+		t.Fatalf("job = %+v", j)
+	}
+	if calls := runner.recorded(); !slices.Equal(calls, []string{"pull trader"}) {
+		t.Fatalf("calls = %v", calls)
+	}
+}
+
+func TestPostCheck_SynchronousAndNotBlockedByRunningJob(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{})
+	runner := &stubRunner{
+		allowed: []string{"trader", "ib-gateway"},
+		updateFn: func(ctx context.Context, services []string, pull bool) (updater.Result, error) {
+			close(started)
 			<-block
-			return "重启已完成（已执行 restart）", "", nil
+			return updater.Result{}, nil
+		},
+		checkFn: func(ctx context.Context, services []string) []updater.CheckResult {
+			if dl, ok := ctx.Deadline(); !ok || time.Until(dl) > checkTimeout {
+				t.Errorf("check ctx deadline missing or too long")
+			}
+			f := false
+			return []updater.CheckResult{
+				{Service: "trader", Image: "ghcr.io/x/trader:latest", CurrentVersion: "v1", RemoteVersion: "v1", UpdateAvailable: &f},
+				{Service: "ib-gateway", Image: "ghcr.io/g/ibg:stable", CurrentVersion: "10.49", ErrorCode: updater.CheckErrRemoteAuth},
+			}
 		},
 	}
+	r := newTestRouter(runner)
+	do(t, r, http.MethodPost, "/update", `{"services":["trader"]}`)
+	<-started
+	defer close(block)
 
-	r := gin.New()
-	h := NewHandlers(config.Config{UpdateTimeout: time.Second}, store, runner)
-	r.POST("/restart", h.PostRestart)
-
-	req1 := httptest.NewRequest(http.MethodPost, "/restart", strings.NewReader(`{}`))
-	req1.Header.Set("Content-Type", "application/json")
-	w1 := httptest.NewRecorder()
-	r.ServeHTTP(w1, req1)
-	if w1.Code != http.StatusOK {
-		t.Fatalf("first status = %d, want %d", w1.Code, http.StatusOK)
+	code, env := do(t, r, http.MethodPost, "/check", `{"services":["trader","ib-gateway"]}`)
+	if code != http.StatusOK || env.Code != successCode {
+		t.Fatalf("status = %d code = %d", code, env.Code)
+	}
+	want := `{"results":[{"service":"trader","image":"ghcr.io/x/trader:latest","current_version":"v1","remote_version":"v1","update_available":false},` +
+		`{"service":"ib-gateway","image":"ghcr.io/g/ibg:stable","current_version":"10.49","remote_version":"","update_available":null,"error_code":"remote_auth_failed"}]}`
+	if string(env.Data) != want {
+		t.Fatalf("data = %s\nwant  %s", env.Data, want)
 	}
 
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("首个任务未开始执行")
+	// 同一时刻的 update/pull 仍受单任务锁约束。
+	code, env = do(t, r, http.MethodPost, "/pull", `{"services":["ib-gateway"]}`)
+	if code != http.StatusConflict || env.Code != codeJobConflict {
+		t.Fatalf("pull during update: status=%d code=%d", code, env.Code)
+	}
+}
+
+func TestGetLatestJob(t *testing.T) {
+	runner := &stubRunner{allowed: []string{"trader", "ib-gateway"}}
+	r := newTestRouter(runner)
+
+	code, env := do(t, r, http.MethodGet, "/jobs/latest?service=trader", "")
+	if code != http.StatusNotFound || env.Code != codeJobNotFound {
+		t.Fatalf("empty: status=%d code=%d", code, env.Code)
+	}
+	if code, _ := do(t, r, http.MethodGet, "/jobs/latest", ""); code != http.StatusBadRequest {
+		t.Fatalf("missing service: status=%d", code)
 	}
 
-	req2 := httptest.NewRequest(http.MethodPost, "/restart", strings.NewReader(`{}`))
-	req2.Header.Set("Content-Type", "application/json")
-	w2 := httptest.NewRecorder()
-	r.ServeHTTP(w2, req2)
+	_, env = do(t, r, http.MethodPost, "/update", `{"services":["trader"]}`)
+	first := createdJobID(t, env)
+	waitDone(t, r, first)
+	_, env = do(t, r, http.MethodPost, "/pull", `{"services":["ib-gateway"]}`)
+	second := createdJobID(t, env)
+	waitDone(t, r, second)
 
+	_, env = do(t, r, http.MethodGet, "/jobs/latest?service=trader", "")
+	var j jobData
+	_ = json.Unmarshal(env.Data, &j)
+	if j.ID != first || j.Action != jobs.ActionUpdate || !slices.Equal(j.Upped, []string{"trader"}) {
+		t.Fatalf("latest trader = %+v", j)
+	}
+	_, env = do(t, r, http.MethodGet, "/jobs/latest?service=ib-gateway", "")
+	_ = json.Unmarshal(env.Data, &j)
+	if j.ID != second || j.Action != jobs.ActionPull {
+		t.Fatalf("latest ib-gateway = %+v", j)
+	}
+	if code, _ := do(t, r, http.MethodGet, "/jobs/"+first, ""); code != http.StatusOK {
+		t.Fatalf("get job status = %d", code)
+	}
+}
+
+func TestPostRestart_UnchangedUsesAllTargetServices(t *testing.T) {
+	runner := &stubRunner{allowed: []string{"api", "worker"}}
+	r := newTestRouter(runner)
+	code, env := do(t, r, http.MethodPost, "/restart", `{"services":["ignored"]}`)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	j := waitDone(t, r, createdJobID(t, env))
+	if j.Status != jobs.StatusSucceeded || !slices.Equal(j.Services, []string{"api", "worker"}) {
+		t.Fatalf("job = %+v", j)
+	}
+
+	r2 := newTestRouter(&stubRunner{})
+	if code, _ := do(t, r2, http.MethodPost, "/restart", ``); code != http.StatusForbidden {
+		t.Fatalf("no allowed services: status = %d", code)
+	}
+}
+
+func TestPostRestart_ConflictWhileUpdateRunning(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{})
+	runner := &stubRunner{
+		allowed: []string{"api", "worker"},
+		updateFn: func(ctx context.Context, services []string, pull bool) (updater.Result, error) {
+			close(started)
+			<-block
+			return updater.Result{}, nil
+		},
+	}
+	r := newTestRouter(runner)
+	do(t, r, http.MethodPost, "/update", `{"services":["api"]}`)
+	<-started
+	code, env := do(t, r, http.MethodPost, "/restart", `{}`)
 	close(block)
+	if code != http.StatusConflict {
+		t.Fatalf("status = %d", code)
+	}
+	var d struct {
+		ExistingServices  []string `json:"existing_services"`
+		RequestedServices []string `json:"requested_services"`
+	}
+	_ = json.Unmarshal(env.Data, &d)
+	if !slices.Equal(d.ExistingServices, []string{"api"}) || !slices.Equal(d.RequestedServices, []string{"api", "worker"}) {
+		t.Fatalf("conflict data = %s", env.Data)
+	}
+}
 
-	if w2.Code != http.StatusConflict {
-		t.Fatalf("second status = %d, want %d", w2.Code, http.StatusConflict)
-	}
-	var resp struct {
-		Code int `json:"code"`
-		Data struct {
-			Services          []string `json:"services"`
-			ExistingServices  []string `json:"existing_services"`
-			RequestedServices []string `json:"requested_services"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal conflict response: %v", err)
-	}
-	if resp.Code != codeJobConflict {
-		t.Fatalf("code = %d, want %d", resp.Code, codeJobConflict)
-	}
-	if len(resp.Data.Services) != 2 {
-		t.Fatalf("services = %#v", resp.Data.Services)
-	}
-	if len(resp.Data.ExistingServices) != 2 || resp.Data.ExistingServices[0] != "api" {
-		t.Fatalf("existing services = %#v", resp.Data.ExistingServices)
-	}
-	if len(resp.Data.RequestedServices) != 2 || resp.Data.RequestedServices[1] != "worker" {
-		t.Fatalf("requested services = %#v", resp.Data.RequestedServices)
+// 路由注册（含 /jobs/latest 与 /jobs/:id 共存）不应 panic。
+func TestNewRouterRegistersRoutes(t *testing.T) {
+	r := NewRouter(config.Config{UpdateTimeout: time.Second}, jobs.NewStore(), updater.NewRunner(config.Config{}))
+	code, _ := do(t, r, http.MethodGet, "/jobs/latest?service=trader", "")
+	if code != http.StatusNotFound {
+		t.Fatalf("status = %d", code)
 	}
 }

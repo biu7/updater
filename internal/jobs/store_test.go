@@ -57,3 +57,45 @@ func TestStore_FinishSkipped_ReleasesService(t *testing.T) {
 		t.Fatalf("跳过后应可再次入队，但得到冲突 existing=%v", ex)
 	}
 }
+
+func TestStore_LatestAndHistoryCap(t *testing.T) {
+	s := NewStore()
+	if s.Latest("trader") != nil {
+		t.Fatal("empty store should have no latest job")
+	}
+	var traderJob, gatewayJob string
+	for i := 0; i < MaxHistory+5; i++ {
+		svc := "trader"
+		if i%2 == 1 {
+			svc = "ib-gateway"
+		}
+		j, _, err := s.TryEnqueueBatch([]string{svc}, ActionUpdate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			traderJob = j.ID
+		}
+		s.MarkRunning(j.ID)
+		s.Finish(j.ID, StatusSucceeded, Outcome{Message: "ok", NeedsUp: []string{svc}, Upped: []string{svc}})
+		if svc == "ib-gateway" {
+			gatewayJob = j.ID
+		}
+	}
+	if len(s.order) != MaxHistory || len(s.jobs) != MaxHistory {
+		t.Fatalf("history size = %d/%d, want %d", len(s.order), len(s.jobs), MaxHistory)
+	}
+	if s.Get(traderJob) != nil {
+		t.Fatal("oldest job should be evicted")
+	}
+	latest := s.Latest("ib-gateway")
+	if latest == nil || latest.ID != gatewayJob || len(latest.Upped) != 1 || latest.Upped[0] != "ib-gateway" {
+		t.Fatalf("latest = %+v, want %s", latest, gatewayJob)
+	}
+	if got := s.Latest("trader"); got == nil || got.Services[0] != "trader" {
+		t.Fatalf("latest trader = %+v", got)
+	}
+	if s.Latest("db") != nil {
+		t.Fatal("unknown service should have no job")
+	}
+}

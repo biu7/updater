@@ -19,7 +19,10 @@ func NewRouter(cfg config.Config, store *jobs.Store, runner *updater.Runner) *gi
 	h := NewHandlers(cfg, store, runner)
 	r.GET("/health", h.Health)
 	r.POST("/update", h.PostUpdate)
+	r.POST("/pull", h.PostPull)
+	r.POST("/check", h.PostCheck)
 	r.POST("/restart", h.PostRestart)
+	r.GET("/jobs/latest", h.GetLatestJob)
 	r.GET("/jobs/:id", h.GetJob)
 	return r
 }

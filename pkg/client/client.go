@@ -103,18 +103,24 @@ func (c *Client) Health(ctx context.Context) (*HealthResult, error) {
 	return out, nil
 }
 
-// Update 调用 POST /update，异步创建更新任务。
-func (c *Client) Update(ctx context.Context) (*CreateUpdateResult, error) {
-	return c.createComposeJob(ctx, "/update")
+// Update 调用 POST /update {services}，异步创建更新任务（服务端默认先 pull）。services 必填。
+func (c *Client) Update(ctx context.Context, services []string) (*CreateUpdateResult, error) {
+	body, err := json.Marshal(struct {
+		Services []string `json:"services"`
+	}{Services: services})
+	if err != nil {
+		return nil, err
+	}
+	return c.createComposeJob(ctx, "/update", body)
 }
 
 // Restart 调用 POST /restart，异步创建重启任务。
 func (c *Client) Restart(ctx context.Context) (*CreateUpdateResult, error) {
-	return c.createComposeJob(ctx, "/restart")
+	return c.createComposeJob(ctx, "/restart", []byte("{}"))
 }
 
-func (c *Client) createComposeJob(ctx context.Context, path string) (*CreateUpdateResult, error) {
-	status, env, _, err := c.doRequest(ctx, http.MethodPost, path, bytes.NewReader([]byte("{}")), "application/json")
+func (c *Client) createComposeJob(ctx context.Context, path string, body []byte) (*CreateUpdateResult, error) {
+	status, env, _, err := c.doRequest(ctx, http.MethodPost, path, bytes.NewReader(body), "application/json")
 	if err != nil {
 		return nil, err
 	}

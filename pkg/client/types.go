@@ -31,6 +31,7 @@ type JobAction string
 const (
 	ActionUpdate  JobAction = "update"
 	ActionRestart JobAction = "restart"
+	ActionPull    JobAction = "pull"
 )
 
 // Job 表示 GET /jobs/:id 返回的 data 中的任务信息。
@@ -41,6 +42,9 @@ type Job struct {
 	Status     JobStatus  `json:"status"`
 	Error      string     `json:"error,omitempty"`
 	LogTail    string     `json:"log_tail,omitempty"`
+	NeedsUp    []string   `json:"needs_up"`
+	Upped      []string   `json:"upped"`
+	Uncertain  []string   `json:"uncertain"`
 	CreatedAt  time.Time  `json:"created_at"`
 	StartedAt  *time.Time `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`

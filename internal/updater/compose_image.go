@@ -3,6 +3,7 @@ package updater
 // 本文件通过 compose config 解析镜像引用，并用 docker image inspect 对比 pull 前后镜像 ID。
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,10 +14,7 @@ import (
 
 // composeConfigRootExec 执行 docker compose config --format json 并解析为通用 map。
 func (r *Runner) composeConfigRootExec(ctx context.Context) (map[string]any, error) {
-	args := append(r.composeBaseArgs(), "config", "--format", "json")
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Dir = r.cfg.ComposeProjectDir
-	out, err := cmd.Output()
+	out, err := r.output(ctx, append(r.composeBaseArgs(), "config", "--format", "json"))
 	if err != nil {
 		return nil, fmt.Errorf("docker compose config: %w", err)
 	}
@@ -71,8 +69,7 @@ func (r *Runner) localImageIDExec(ctx context.Context, imageRef string) (string,
 	if imageRef == "" {
 		return "", fmt.Errorf("镜像引用为空")
 	}
-	cmd := exec.CommandContext(ctx, "docker", "image", "inspect", imageRef, "-f", "{{.Id}}")
-	out, err := cmd.Output()
+	out, err := r.output(ctx, []string{"image", "inspect", imageRef, "-f", "{{.Id}}"})
 	if err != nil {
 		return "", err
 	}
@@ -84,10 +81,7 @@ func (r *Runner) runningServiceImageIDsExec(ctx context.Context, service string)
 	if strings.TrimSpace(service) == "" {
 		return nil, fmt.Errorf("服务名为空")
 	}
-	args := append(r.composeBaseArgs(), "ps", "-q", service)
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Dir = r.cfg.ComposeProjectDir
-	out, err := cmd.Output()
+	out, err := r.output(ctx, append(r.composeBaseArgs(), "ps", "-q", service))
 	if err != nil {
 		return nil, fmt.Errorf("docker compose ps -q %s: %w", service, err)
 	}
@@ -96,13 +90,33 @@ func (r *Runner) runningServiceImageIDsExec(ctx context.Context, service string)
 		return nil, nil
 	}
 
-	inspectArgs := append([]string{"inspect", "-f", "{{.Image}}"}, containerIDs...)
-	inspectCmd := exec.CommandContext(ctx, "docker", inspectArgs...)
-	inspectOut, err := inspectCmd.Output()
+	inspectOut, err := r.output(ctx, append([]string{"inspect", "-f", "{{.Image}}"}, containerIDs...))
 	if err != nil {
 		return nil, fmt.Errorf("docker inspect service %s containers: %w", service, err)
 	}
 	return normalizeImageIDs(splitNonEmptyLines(string(inspectOut))), nil
+}
+
+// output 执行 docker 子命令并返回 stdout；失败时错误中附带截断后的 stderr。
+func (r *Runner) output(ctx context.Context, args []string) ([]byte, error) {
+	if r.outputFn != nil {
+		return r.outputFn(ctx, args)
+	}
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Dir = r.cfg.ComposeProjectDir
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			if len(msg) > 512 {
+				msg = msg[:512]
+			}
+			return out, fmt.Errorf("%w: %s", err, msg)
+		}
+		return out, err
+	}
+	return out, nil
 }
 
 // splitNonEmptyLines 将多行输出转为去空白后的切片。
